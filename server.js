@@ -186,6 +186,62 @@ app.get('/farms', async (req, res) => {
   }
 });
 
+// ── Add Liquidity ─────────────────────────────────────────
+app.post('/build/liquidity', async (req, res) => {
+  try {
+    const { tokenA, tokenB, amountA, walletAddress } = req.body;
+    const isTonA = !tokenA || tokenA === 'ton';
+
+    const sim = await apiClient.simulateLiquidityProvision({
+      provisionType: 'Balanced',
+      tokenA: isTonA ? 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c' : tokenA,
+      tokenB,
+      tokenAUnits: String(BigInt(Math.round(parseFloat(amountA) * 1e9))),
+      slippageTolerance: '0.01',
+    });
+
+    const routerInfo = sim.router || await apiClient.getRouter(sim.routerAddress);
+    const dex = DEX.v1;
+    const router = tonClient.open(new dex.Router());
+    const proxyTon = new pTON.v1();
+
+    let txParams;
+    if (isTonA) {
+      txParams = await router.getProvideLiquidityTonTxParams({
+        userWalletAddress: walletAddress,
+        proxyTon,
+        otherTokenAddress: tokenB,
+        sendAmount: BigInt(sim.tokenAUnits || Math.round(parseFloat(amountA) * 1e9)),
+        minLpOut: BigInt(sim.minLpOut || '1'),
+        queryId: Date.now(),
+      });
+    } else {
+      txParams = await router.getProvideLiquidityJettonTxParams({
+        userWalletAddress: walletAddress,
+        sendTokenAddress: tokenA,
+        sendAmount: BigInt(sim.tokenAUnits || Math.round(parseFloat(amountA) * 1e9)),
+        otherTokenAddress: tokenB,
+        minLpOut: BigInt(sim.minLpOut || '1'),
+        queryId: Date.now(),
+      });
+    }
+
+    res.json({
+      ok: true,
+      simulation: sim,
+      transaction: {
+        validUntil: Math.floor(Date.now() / 1000) + 300,
+        messages: [{
+          address: txParams.to.toString({ bounceable: true, urlSafe: true }),
+          amount: txParams.value.toString(),
+          payload: txParams.body?.toBoc().toString('base64') ?? '',
+        }]
+      }
+    });
+  } catch(e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
-
