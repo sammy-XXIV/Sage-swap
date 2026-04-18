@@ -47,9 +47,10 @@ app.post('/build/swap', async (req, res) => {
     const isTonAsk = !toToken   || toToken   === 'ton';
     const slip = parseFloat(slippage ?? 0.01);
 
+    const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
     const sim = await apiClient.simulateSwap({
-      offerAddress: isTon    ? 'ton' : fromToken,
-      askAddress:   isTonAsk ? 'ton' : toToken,
+      offerAddress: isTon    ? TON_NATIVE : fromToken,
+      askAddress:   isTonAsk ? TON_NATIVE : toToken,
       offerUnits:   String(BigInt(Math.round(parseFloat(fromAmount) * 1e9))),
       slippageTolerance: String(slip),
     });
