@@ -11,6 +11,7 @@
     "cors": "^2.8.5",
     "@ston-fi/sdk": "^2.2.0",
     "@ston-fi/api": "^0.13.0",
-    "@ton/ton": "^13.11.2"
+    "@ton/ton": "^13.11.2",
+    "tonstakers-sdk": "latest"
   }
 }
