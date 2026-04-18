@@ -1,0 +1,110 @@
+import express from 'express';
+import cors from 'cors';
+import { DEX, pTON } from '@ston-fi/sdk';
+import { StonApiClient } from '@ston-fi/api';
+import { Client } from '@ston-fi/sdk';
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const apiClient = new StonApiClient();
+const tonClient = new Client({ endpoint: 'https://toncenter.com/api/v2/jsonRPC' });
+
+app.get('/ping', (req, res) => res.json({ ok: true, service: 'SAGE Swap v1' }));
+
+// ── Swap ─────────────────────────────────────────────────
+app.post('/build/swap', async (req, res) => {
+  try {
+    const { fromToken, toToken, fromAmount, walletAddress, slippage } = req.body;
+    const isTon    = !fromToken || fromToken === 'ton';
+    const isTonAsk = !toToken   || toToken   === 'ton';
+    const slip = parseFloat(slippage ?? 0.01);
+
+    // Simulate via STON.fi API to get routing + amounts
+    const sim = await apiClient.simulateSwap({
+      offerAddress: isTon    ? 'ton' : fromToken,
+      askAddress:   isTonAsk ? 'ton' : toToken,
+      offerUnits:   String(BigInt(Math.round(parseFloat(fromAmount) * 1e9))),
+      slippageTolerance: String(slip),
+    });
+
+    if (!sim.askUnits) throw new Error('No liquidity for this pair');
+
+    // Build tx using SDK — this is the correct way
+    const routerInfo = sim.router;
+    const dex = DEX.v1;
+    const router = tonClient.open(new dex.Router());
+    const proxyTon = new pTON.v1();
+
+    let txParams;
+    if (isTon) {
+      txParams = await router.getSwapTonToJettonTxParams({
+        userWalletAddress: walletAddress,
+        proxyTon,
+        offerAmount: BigInt(sim.offerUnits),
+        askJettonAddress: toToken,
+        minAskAmount: BigInt(sim.minAskUnits),
+        queryId: Date.now(),
+      });
+    } else if (isTonAsk) {
+      txParams = await router.getSwapJettonToTonTxParams({
+        userWalletAddress: walletAddress,
+        offerJettonAddress: fromToken,
+        offerAmount: BigInt(sim.offerUnits),
+        proxyTon,
+        minAskAmount: BigInt(sim.minAskUnits),
+        queryId: Date.now(),
+      });
+    } else {
+      txParams = await router.getSwapJettonToJettonTxParams({
+        userWalletAddress: walletAddress,
+        offerJettonAddress: fromToken,
+        offerAmount: BigInt(sim.offerUnits),
+        askJettonAddress: toToken,
+        minAskAmount: BigInt(sim.minAskUnits),
+        queryId: Date.now(),
+      });
+    }
+
+    res.json({
+      ok: true,
+      simulation: {
+        offerUnits: sim.offerUnits,
+        askUnits: sim.askUnits,
+        minAskUnits: sim.minAskUnits,
+        swapRate: sim.swapRate,
+        priceImpact: sim.priceImpact,
+      },
+      transaction: {
+        validUntil: Math.floor(Date.now() / 1000) + 300,
+        messages: [{
+          address: txParams.to.toString(),
+          amount:  txParams.value.toString(),
+          payload: txParams.body?.toBoc().toString('base64'),
+        }]
+      }
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Token search ──────────────────────────────────────────
+app.post('/search/token', async (req, res) => {
+  try {
+    const { symbol } = req.body;
+    const assets = await apiClient.queryAssets({ searchString: symbol, limit: 10 });
+    const match = assets.find(a => a.symbol?.toUpperCase() === symbol.toUpperCase() && a.dexUsdPrice && !a.blacklisted)
+      || assets.find(a => a.symbol?.toUpperCase() === symbol.toUpperCase())
+      || assets[0];
+    if (!match) return res.status(404).json({ ok: false, error: `"${symbol}" not found` });
+    res.json({ ok: true, symbol: match.symbol, address: match.contractAddress, decimals: match.decimals ?? 9, price: match.dexUsdPrice });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`SAGE Swap running on port ${PORT}`));
+
