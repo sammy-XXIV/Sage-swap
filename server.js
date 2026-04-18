@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { DEX, pTON } from '@ston-fi/sdk';
+import { FARM } from '@ston-fi/sdk';
 import { StonApiClient } from '@ston-fi/api';
 import { Client } from '@ston-fi/sdk';
 
@@ -133,5 +134,58 @@ app.post('/search/token', async (req, res) => {
   }
 });
 
+// ── Stake LP tokens in farm ──────────────────────────────
+// farmAddress = the specific farm contract address from STON.fi API
+// lpTokenAddress = the LP token jetton address for that farm
+app.post('/build/stake', async (req, res) => {
+  try {
+    const { walletAddress, farmAddress, lpTokenAddress, lpAmount } = req.body;
+    if (!walletAddress || !farmAddress || !lpTokenAddress || !lpAmount) {
+      return res.status(400).json({ ok: false, error: 'Missing walletAddress, farmAddress, lpTokenAddress, or lpAmount' });
+    }
+
+    const farm = tonClient.open(FARM.v3.NftMinter.create(farmAddress));
+    const stakeTxParams = await farm.getStakeTxParams({
+      userWalletAddress: walletAddress,
+      jettonAddress: lpTokenAddress,
+      jettonAmount: BigInt(Math.round(parseFloat(lpAmount) * 1e9)),
+      queryId: Date.now(),
+    });
+
+    res.json({
+      ok: true,
+      transaction: {
+        validUntil: Math.floor(Date.now() / 1000) + 300,
+        messages: [{
+          address: stakeTxParams.to.toString({ bounceable: true, urlSafe: true }),
+          amount:  stakeTxParams.value.toString(),
+          payload: stakeTxParams.body?.toBoc().toString('base64') ?? '',
+        }]
+      }
+    });
+  } catch(e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Get available farms ───────────────────────────────────
+app.get('/farms', async (req, res) => {
+  try {
+    const farms = await apiClient.getFarms();
+    res.json({ ok: true, farms: farms.slice(0, 20).map(f => ({
+      address: f.address,
+      poolAddress: f.poolAddress,
+      apr: f.apr,
+      tvl: f.tvl,
+      rewardToken: f.rewardTokenSymbol,
+      lpToken: f.lpTokenAddress,
+      name: f.poolName,
+    }))});
+  } catch(e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
+
