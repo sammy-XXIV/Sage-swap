@@ -13,6 +13,33 @@ const tonClient = new Client({ endpoint: 'https://toncenter.com/api/v2/jsonRPC' 
 
 app.get('/ping', (req, res) => res.json({ ok: true, service: 'SAGE Swap v1' }));
 
+// Test swap build — GET for easy browser testing
+app.get('/test/swap', async (req, res) => {
+  try {
+    const router = tonClient.open(new DEX.v1.Router());
+    const proxyTon = new pTON.v1();
+    const txParams = await router.getSwapTonToJettonTxParams({
+      userWalletAddress: 'UQDnWz8mfNx3NEdBWYqLLXUQ7oPp6fAg5jvs-Yt7LHUrJURh',
+      proxyTon,
+      offerAmount: BigInt('71000000'),
+      askJettonAddress: 'EQAvlWFDxGF2lXm67y4yzC17wYKD9A0guwPkMs1gOsM__NOT',
+      minAskAmount: BigInt('1'),
+      queryId: 12345,
+    });
+    const toStr = txParams.to.toString({ bounceable: true, urlSafe: true });
+    const toRaw = txParams.to.toRawString();
+    res.json({
+      ok: true,
+      to_friendly: toStr,
+      to_raw: toRaw,
+      value: txParams.value.toString(),
+      has_payload: !!txParams.body,
+    });
+  } catch(e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
 app.post('/build/swap', async (req, res) => {
   try {
     const { fromToken, toToken, fromAmount, walletAddress, slippage } = req.body;
