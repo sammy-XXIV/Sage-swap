@@ -13,7 +13,6 @@ const tonClient = new Client({ endpoint: 'https://toncenter.com/api/v2/jsonRPC' 
 
 app.get('/ping', (req, res) => res.json({ ok: true, service: 'SAGE Swap v1' }));
 
-// ── Swap ─────────────────────────────────────────────────
 app.post('/build/swap', async (req, res) => {
   try {
     const { fromToken, toToken, fromAmount, walletAddress, slippage } = req.body;
@@ -21,7 +20,6 @@ app.post('/build/swap', async (req, res) => {
     const isTonAsk = !toToken   || toToken   === 'ton';
     const slip = parseFloat(slippage ?? 0.01);
 
-    // Simulate via STON.fi API to get routing + amounts
     const sim = await apiClient.simulateSwap({
       offerAddress: isTon    ? 'ton' : fromToken,
       askAddress:   isTonAsk ? 'ton' : toToken,
@@ -31,10 +29,7 @@ app.post('/build/swap', async (req, res) => {
 
     if (!sim.askUnits) throw new Error('No liquidity for this pair');
 
-    // Build tx using SDK — this is the correct way
-    const routerInfo = sim.router;
-    const dex = DEX.v1;
-    const router = tonClient.open(new dex.Router());
+    const router = tonClient.open(new DEX.v1.Router());
     const proxyTon = new pTON.v1();
 
     let txParams;
@@ -67,8 +62,14 @@ app.post('/build/swap', async (req, res) => {
       });
     }
 
+    // toString() with bounceable=true, urlSafe=true gives EQ... format
+    // which is what TON Connect expects
+    const toAddress = txParams.to.toString({ bounceable: true, urlSafe: true });
+    const payload = txParams.body?.toBoc().toString('base64');
+
     res.json({
       ok: true,
+      debug: { toAddress, toRaw: txParams.to.toRawString() },
       simulation: {
         offerUnits: sim.offerUnits,
         askUnits: sim.askUnits,
@@ -79,18 +80,17 @@ app.post('/build/swap', async (req, res) => {
       transaction: {
         validUntil: Math.floor(Date.now() / 1000) + 300,
         messages: [{
-          address: txParams.to.toString(),
+          address: toAddress,
           amount:  txParams.value.toString(),
-          payload: txParams.body?.toBoc().toString('base64'),
+          payload: payload ?? '',
         }]
       }
     });
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(400).json({ ok: false, error: e.message, stack: e.stack?.split('\n').slice(0,3) });
   }
 });
 
-// ── Token search ──────────────────────────────────────────
 app.post('/search/token', async (req, res) => {
   try {
     const { symbol } = req.body;
@@ -106,5 +106,4 @@ app.post('/search/token', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`SAGE Swap running on port ${PORT}`));
-
+app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
