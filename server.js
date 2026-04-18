@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { DEX, pTON } from '@ston-fi/sdk';
 import { FARM } from '@ston-fi/sdk';
+import { Tonstakers } from 'tonstakers-sdk';
 import { StonApiClient } from '@ston-fi/api';
 import { Client } from '@ston-fi/sdk';
 
@@ -243,5 +244,59 @@ app.post('/build/liquidity', async (req, res) => {
   }
 });
 
+// ── TON Stakers — stake TON get tsTON ────────────────────
+app.post('/build/tonstake', async (req, res) => {
+  try {
+    const { walletAddress, amount } = req.body;
+    if (!walletAddress || !amount) return res.status(400).json({ ok: false, error: 'Missing fields' });
+
+    const tonstakers = new Tonstakers({
+      tonApiKey: '',
+      tonClientParameters: { endpoint: 'https://toncenter.com/api/v2/jsonRPC' },
+    });
+    await tonstakers.init();
+
+    const nanoAmount = BigInt(Math.round(parseFloat(amount) * 1e9));
+    const txParams = await tonstakers.getStakeTxParams(nanoAmount);
+    const apy = await tonstakers.getCurrentApy();
+    const tvl = await tonstakers.getTvl();
+
+    res.json({
+      ok: true,
+      apy: apy,
+      tvl: tvl,
+      transaction: {
+        validUntil: Math.floor(Date.now() / 1000) + 300,
+        messages: [{
+          address: txParams.to.toString({ bounceable: true, urlSafe: true }),
+          amount:  txParams.value.toString(),
+          payload: txParams.body?.toBoc().toString('base64') ?? '',
+        }]
+      }
+    });
+  } catch(e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+// ── TON Stakers APY/stats ─────────────────────────────────
+app.get('/tonstake/stats', async (req, res) => {
+  try {
+    const tonstakers = new Tonstakers({
+      tonApiKey: '',
+      tonClientParameters: { endpoint: 'https://toncenter.com/api/v2/jsonRPC' },
+    });
+    await tonstakers.init();
+    const [apy, tvl] = await Promise.all([
+      tonstakers.getCurrentApy(),
+      tonstakers.getTvl(),
+    ]);
+    res.json({ ok: true, apy, tvl });
+  } catch(e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
+
