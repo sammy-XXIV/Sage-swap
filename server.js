@@ -1,10 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import { DEX, pTON } from '@ston-fi/sdk';
-import { FARM } from '@ston-fi/sdk';
-import { Tonstakers } from 'tonstakers-sdk';
+import crypto from 'crypto';
+import { mnemonicToPrivateKey, mnemonicNew } from '@ton/crypto';
+import { WalletContractV4, internal } from '@ton/ton';
+import { createClient } from '@supabase/supabase-js';
+import { DEX, pTON, FARM, Client } from '@ston-fi/sdk';
 import { StonApiClient } from '@ston-fi/api';
-import { Client } from '@ston-fi/sdk';
+import { Tonstakers } from 'tonstakers-sdk';
 
 const app = express();
 app.use(cors());
@@ -12,291 +14,283 @@ app.use(express.json());
 
 const apiClient = new StonApiClient();
 const tonClient = new Client({ endpoint: 'https://toncenter.com/api/v2/jsonRPC' });
+const supabase = createClient(process.env.SUPABASE_URL||'', process.env.SUPABASE_KEY||'');
+const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
 
-app.get('/ping', (req, res) => res.json({ ok: true, service: 'SAGE Swap v1' }));
+// ── Encryption ────────────────────────────────────────────
+function encrypt(text) {
+  const iv = crypto.randomBytes(16);
+  const key = crypto.scryptSync(process.env.ENCRYPTION_KEY||'sage-default-32-char-key-padded!', 'salt', 32);
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+  return iv.toString('hex')+':'+Buffer.concat([cipher.update(text),cipher.final()]).toString('hex');
+}
+function decrypt(text) {
+  const [ivHex,encHex] = text.split(':');
+  const key = crypto.scryptSync(process.env.ENCRYPTION_KEY||'sage-default-32-char-key-padded!', 'salt', 32);
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, Buffer.from(ivHex,'hex'));
+  return Buffer.concat([decipher.update(Buffer.from(encHex,'hex')),decipher.final()]).toString();
+}
 
-// Test swap build — GET for easy browser testing
-app.get('/test/swap', async (req, res) => {
-  try {
-    const router = tonClient.open(new DEX.v1.Router());
-    const proxyTon = new pTON.v1();
-    const txParams = await router.getSwapTonToJettonTxParams({
-      userWalletAddress: 'UQDnWz8mfNx3NEdBWYqLLXUQ7oPp6fAg5jvs-Yt7LHUrJURh',
-      proxyTon,
-      offerAmount: BigInt('71000000'),
-      askJettonAddress: 'EQAvlWFDxGF2lXm67y4yzC17wYKD9A0guwPkMs1gOsM__NOT',
-      minAskAmount: BigInt('1'),
-      queryId: 12345,
+// ── Per-user agent wallet ────────────────────────────────
+async function getUserWallet(userWallet) {
+  const { data: existing } = await supabase.from('agent_wallets').select('*').eq('user_wallet',userWallet).single();
+  let mnemonic;
+  if(existing) {
+    mnemonic = decrypt(existing.encrypted_mnemonic).split(' ');
+  } else {
+    mnemonic = await mnemonicNew(24);
+    const kp = await mnemonicToPrivateKey(mnemonic);
+    const w = WalletContractV4.create({ workchain:0, publicKey:kp.publicKey });
+    const addr = w.address.toString({ bounceable:false, urlSafe:true });
+    await supabase.from('agent_wallets').insert({
+      user_wallet: userWallet, agent_address: addr,
+      encrypted_mnemonic: encrypt(mnemonic.join(' ')),
+      created_at: new Date().toISOString(),
     });
-    const toStr = txParams.to.toString({ bounceable: true, urlSafe: true });
-    const toRaw = txParams.to.toRawString();
-    res.json({
-      ok: true,
-      to_friendly: toStr,
-      to_raw: toRaw,
-      value: txParams.value.toString(),
-      has_payload: !!txParams.body,
-    });
-  } catch(e) {
-    res.status(400).json({ ok: false, error: e.message });
   }
-});
+  const keyPair = await mnemonicToPrivateKey(mnemonic);
+  const wallet = WalletContractV4.create({ workchain:0, publicKey:keyPair.publicKey });
+  const contract = tonClient.open(wallet);
+  const address = wallet.address.toString({ bounceable:false, urlSafe:true });
+  return { wallet, contract, keyPair, address };
+}
 
-app.post('/build/swap', async (req, res) => {
+// ── Health ────────────────────────────────────────────────
+app.get('/ping', (req,res) => res.json({ ok:true, service:'SAGE Swap v2' }));
+
+// ── Swap ──────────────────────────────────────────────────
+app.post('/build/swap', async (req,res) => {
   try {
     const { fromToken, toToken, fromAmount, walletAddress, slippage } = req.body;
-    const isTon    = !fromToken || fromToken === 'ton';
-    const isTonAsk = !toToken   || toToken   === 'ton';
-    const slip = parseFloat(slippage ?? 0.01);
-
-    const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
+    const isTon = !fromToken||fromToken==='ton';
+    const isTonAsk = !toToken||toToken==='ton';
+    const slip = parseFloat(slippage??0.01);
     const sim = await apiClient.simulateSwap({
-      offerAddress: isTon    ? TON_NATIVE : fromToken,
-      askAddress:   isTonAsk ? TON_NATIVE : toToken,
-      offerUnits:   String(BigInt(Math.round(parseFloat(fromAmount) * 1e9))),
+      offerAddress: isTon?TON_NATIVE:fromToken,
+      askAddress: isTonAsk?TON_NATIVE:toToken,
+      offerUnits: String(BigInt(Math.round(parseFloat(fromAmount)*1e9))),
       slippageTolerance: String(slip),
     });
-
-    if (!sim.askUnits) throw new Error('No liquidity for this pair');
-
+    if(!sim.askUnits) throw new Error('No liquidity for this pair');
     const router = tonClient.open(new DEX.v1.Router());
     const proxyTon = new pTON.v1();
-
     let txParams;
-    if (isTon) {
-      txParams = await router.getSwapTonToJettonTxParams({
-        userWalletAddress: walletAddress,
-        proxyTon,
-        offerAmount: BigInt(sim.offerUnits),
-        askJettonAddress: toToken,
-        minAskAmount: BigInt(sim.minAskUnits),
-        queryId: Date.now(),
-      });
-    } else if (isTonAsk) {
-      txParams = await router.getSwapJettonToTonTxParams({
-        userWalletAddress: walletAddress,
-        offerJettonAddress: fromToken,
-        offerAmount: BigInt(sim.offerUnits),
-        proxyTon,
-        minAskAmount: BigInt(sim.minAskUnits),
-        queryId: Date.now(),
-      });
-    } else {
-      txParams = await router.getSwapJettonToJettonTxParams({
-        userWalletAddress: walletAddress,
-        offerJettonAddress: fromToken,
-        offerAmount: BigInt(sim.offerUnits),
-        askJettonAddress: toToken,
-        minAskAmount: BigInt(sim.minAskUnits),
-        queryId: Date.now(),
-      });
-    }
-
-    // toString() with bounceable=true, urlSafe=true gives EQ... format
-    // which is what TON Connect expects
-    const toAddress = txParams.to.toString({ bounceable: true, urlSafe: true });
-    const payload = txParams.body?.toBoc().toString('base64');
-
-    res.json({
-      ok: true,
-      debug: { toAddress, toRaw: txParams.to.toRawString() },
-      simulation: {
-        offerUnits: sim.offerUnits,
-        askUnits: sim.askUnits,
-        minAskUnits: sim.minAskUnits,
-        swapRate: sim.swapRate,
-        priceImpact: sim.priceImpact,
-      },
-      transaction: {
-        validUntil: Math.floor(Date.now() / 1000) + 300,
-        messages: [{
-          address: toAddress,
-          amount:  txParams.value.toString(),
-          payload: payload ?? '',
-        }]
-      }
-    });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message, stack: e.stack?.split('\n').slice(0,3) });
-  }
+    if(isTon) txParams = await router.getSwapTonToJettonTxParams({ userWalletAddress:walletAddress, proxyTon, offerAmount:BigInt(sim.offerUnits), askJettonAddress:toToken, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
+    else if(isTonAsk) txParams = await router.getSwapJettonToTonTxParams({ userWalletAddress:walletAddress, offerJettonAddress:fromToken, offerAmount:BigInt(sim.offerUnits), proxyTon, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
+    else txParams = await router.getSwapJettonToJettonTxParams({ userWalletAddress:walletAddress, offerJettonAddress:fromToken, offerAmount:BigInt(sim.offerUnits), askJettonAddress:toToken, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
+    const toAddress = txParams.to.toString({ bounceable:true, urlSafe:true });
+    res.json({ ok:true, simulation:{ offerUnits:sim.offerUnits, askUnits:sim.askUnits, minAskUnits:sim.minAskUnits, swapRate:sim.swapRate, priceImpact:sim.priceImpact }, transaction:{ validUntil:Math.floor(Date.now()/1000)+300, messages:[{ address:toAddress, amount:txParams.value.toString(), payload:txParams.body?.toBoc().toString('base64')??'' }] } });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
 });
 
-app.post('/search/token', async (req, res) => {
+// ── Token search ──────────────────────────────────────────
+app.post('/search/token', async (req,res) => {
   try {
     const { symbol } = req.body;
-    const assets = await apiClient.queryAssets({ searchString: symbol, limit: 10 });
-    const match = assets.find(a => a.symbol?.toUpperCase() === symbol.toUpperCase() && a.dexUsdPrice && !a.blacklisted)
-      || assets.find(a => a.symbol?.toUpperCase() === symbol.toUpperCase())
-      || assets[0];
-    if (!match) return res.status(404).json({ ok: false, error: `"${symbol}" not found` });
-    res.json({ ok: true, symbol: match.symbol, address: match.contractAddress, decimals: match.decimals ?? 9, price: match.dexUsdPrice });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
+    const assets = await apiClient.queryAssets({ searchString:symbol, limit:10 });
+    const match = assets.find(a=>a.symbol?.toUpperCase()===symbol.toUpperCase()&&a.dexUsdPrice&&!a.blacklisted)||assets.find(a=>a.symbol?.toUpperCase()===symbol.toUpperCase())||assets[0];
+    if(!match) return res.status(404).json({ ok:false, error:`"${symbol}" not found` });
+    res.json({ ok:true, symbol:match.symbol, address:match.contractAddress, decimals:match.decimals??9, price:match.dexUsdPrice });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
 });
 
-// ── Stake LP tokens in farm ──────────────────────────────
-// farmAddress = the specific farm contract address from STON.fi API
-// lpTokenAddress = the LP token jetton address for that farm
-app.post('/build/stake', async (req, res) => {
-  try {
-    const { walletAddress, farmAddress, lpTokenAddress, lpAmount } = req.body;
-    if (!walletAddress || !farmAddress || !lpTokenAddress || !lpAmount) {
-      return res.status(400).json({ ok: false, error: 'Missing walletAddress, farmAddress, lpTokenAddress, or lpAmount' });
-    }
-
-    const farm = tonClient.open(FARM.v3.NftMinter.create(farmAddress));
-    const stakeTxParams = await farm.getStakeTxParams({
-      userWalletAddress: walletAddress,
-      jettonAddress: lpTokenAddress,
-      jettonAmount: BigInt(Math.round(parseFloat(lpAmount) * 1e9)),
-      queryId: Date.now(),
-    });
-
-    res.json({
-      ok: true,
-      transaction: {
-        validUntil: Math.floor(Date.now() / 1000) + 300,
-        messages: [{
-          address: stakeTxParams.to.toString({ bounceable: true, urlSafe: true }),
-          amount:  stakeTxParams.value.toString(),
-          payload: stakeTxParams.body?.toBoc().toString('base64') ?? '',
-        }]
-      }
-    });
-  } catch(e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-// ── Get available farms ───────────────────────────────────
-app.get('/farms', async (req, res) => {
-  try {
-    const farms = await apiClient.getFarms();
-    res.json({ ok: true, farms: farms.slice(0, 20).map(f => ({
-      address: f.address,
-      poolAddress: f.poolAddress,
-      apr: f.apr,
-      tvl: f.tvl,
-      rewardToken: f.rewardTokenSymbol,
-      lpToken: f.lpTokenAddress,
-      name: f.poolName,
-    }))});
-  } catch(e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-// ── Add Liquidity ─────────────────────────────────────────
-app.post('/build/liquidity', async (req, res) => {
+// ── Liquidity ─────────────────────────────────────────────
+app.post('/build/liquidity', async (req,res) => {
   try {
     const { tokenA, tokenB, amountA, walletAddress } = req.body;
-    const isTonA = !tokenA || tokenA === 'ton';
-
-    const sim = await apiClient.simulateLiquidityProvision({
-      provisionType: 'Balanced',
-      tokenA: isTonA ? 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c' : tokenA,
-      tokenB,
-      tokenAUnits: String(BigInt(Math.round(parseFloat(amountA) * 1e9))),
-      slippageTolerance: '0.01',
-    });
-
-    const routerInfo = sim.router || await apiClient.getRouter(sim.routerAddress);
-    const dex = DEX.v1;
-    const router = tonClient.open(new dex.Router());
+    const isTonA = !tokenA||tokenA==='ton';
+    const sim = await apiClient.simulateLiquidityProvision({ provisionType:'Balanced', tokenA:isTonA?TON_NATIVE:tokenA, tokenB, tokenAUnits:String(BigInt(Math.round(parseFloat(amountA)*1e9))), slippageTolerance:'0.01' });
+    const router = tonClient.open(new DEX.v1.Router());
     const proxyTon = new pTON.v1();
-
     let txParams;
-    if (isTonA) {
-      txParams = await router.getProvideLiquidityTonTxParams({
-        userWalletAddress: walletAddress,
-        proxyTon,
-        otherTokenAddress: tokenB,
-        sendAmount: BigInt(sim.tokenAUnits || Math.round(parseFloat(amountA) * 1e9)),
-        minLpOut: BigInt(sim.minLpOut || '1'),
-        queryId: Date.now(),
-      });
-    } else {
-      txParams = await router.getProvideLiquidityJettonTxParams({
-        userWalletAddress: walletAddress,
-        sendTokenAddress: tokenA,
-        sendAmount: BigInt(sim.tokenAUnits || Math.round(parseFloat(amountA) * 1e9)),
-        otherTokenAddress: tokenB,
-        minLpOut: BigInt(sim.minLpOut || '1'),
-        queryId: Date.now(),
-      });
-    }
-
-    res.json({
-      ok: true,
-      simulation: sim,
-      transaction: {
-        validUntil: Math.floor(Date.now() / 1000) + 300,
-        messages: [{
-          address: txParams.to.toString({ bounceable: true, urlSafe: true }),
-          amount: txParams.value.toString(),
-          payload: txParams.body?.toBoc().toString('base64') ?? '',
-        }]
-      }
-    });
-  } catch(e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
+    if(isTonA) txParams = await router.getProvideLiquidityTonTxParams({ userWalletAddress:walletAddress, proxyTon, otherTokenAddress:tokenB, sendAmount:BigInt(sim.tokenAUnits||Math.round(parseFloat(amountA)*1e9)), minLpOut:BigInt(sim.minLpOut||'1'), queryId:Date.now() });
+    else txParams = await router.getProvideLiquidityJettonTxParams({ userWalletAddress:walletAddress, sendTokenAddress:tokenA, sendAmount:BigInt(sim.tokenAUnits||Math.round(parseFloat(amountA)*1e9)), otherTokenAddress:tokenB, minLpOut:BigInt(sim.minLpOut||'1'), queryId:Date.now() });
+    res.json({ ok:true, simulation:sim, transaction:{ validUntil:Math.floor(Date.now()/1000)+300, messages:[{ address:txParams.to.toString({ bounceable:true, urlSafe:true }), amount:txParams.value.toString(), payload:txParams.body?.toBoc().toString('base64')??'' }] } });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
 });
 
-// ── TON Stakers — stake TON get tsTON ────────────────────
-app.post('/build/tonstake', async (req, res) => {
+// ── Farm stake ────────────────────────────────────────────
+app.post('/build/stake', async (req,res) => {
+  try {
+    const { walletAddress, farmAddress, lpTokenAddress, lpAmount } = req.body;
+    if(!walletAddress||!farmAddress||!lpTokenAddress||!lpAmount) return res.status(400).json({ ok:false, error:'Missing fields' });
+    const farm = tonClient.open(FARM.v3.NftMinter.create(farmAddress));
+    const stakeTxParams = await farm.getStakeTxParams({ userWalletAddress:walletAddress, jettonAddress:lpTokenAddress, jettonAmount:BigInt(Math.round(parseFloat(lpAmount)*1e9)), queryId:Date.now() });
+    res.json({ ok:true, transaction:{ validUntil:Math.floor(Date.now()/1000)+300, messages:[{ address:stakeTxParams.to.toString({ bounceable:true, urlSafe:true }), amount:stakeTxParams.value.toString(), payload:stakeTxParams.body?.toBoc().toString('base64')??'' }] } });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
+});
+
+// ── Farms list ────────────────────────────────────────────
+app.get('/farms', async (req,res) => {
+  try {
+    const farms = await apiClient.getFarms();
+    res.json({ ok:true, farms:farms.slice(0,20).map(f=>({ address:f.address, poolAddress:f.poolAddress, apr:f.apr, tvl:f.tvl, rewardToken:f.rewardTokenSymbol, lpToken:f.lpTokenAddress, name:f.poolName })) });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
+});
+
+// ── TON Stakers ───────────────────────────────────────────
+app.post('/build/tonstake', async (req,res) => {
   try {
     const { walletAddress, amount } = req.body;
-    if (!walletAddress || !amount) return res.status(400).json({ ok: false, error: 'Missing fields' });
-
-    const tonstakers = new Tonstakers({
-      tonApiKey: '',
-      tonClientParameters: { endpoint: 'https://toncenter.com/api/v2/jsonRPC' },
-    });
-    await tonstakers.init();
-
-    const nanoAmount = BigInt(Math.round(parseFloat(amount) * 1e9));
-    const txParams = await tonstakers.getStakeTxParams(nanoAmount);
-    const apy = await tonstakers.getCurrentApy();
-    const tvl = await tonstakers.getTvl();
-
-    res.json({
-      ok: true,
-      apy: apy,
-      tvl: tvl,
-      transaction: {
-        validUntil: Math.floor(Date.now() / 1000) + 300,
-        messages: [{
-          address: txParams.to.toString({ bounceable: true, urlSafe: true }),
-          amount:  txParams.value.toString(),
-          payload: txParams.body?.toBoc().toString('base64') ?? '',
-        }]
-      }
-    });
-  } catch(e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
+    if(!walletAddress||!amount) return res.status(400).json({ ok:false, error:'Missing fields' });
+    const ts = new Tonstakers({ tonApiKey:'', tonClientParameters:{ endpoint:'https://toncenter.com/api/v2/jsonRPC' } });
+    await ts.init();
+    const txParams = await ts.getStakeTxParams(BigInt(Math.round(parseFloat(amount)*1e9)));
+    const [apy,tvl] = await Promise.all([ts.getCurrentApy(),ts.getTvl()]);
+    res.json({ ok:true, apy, tvl, transaction:{ validUntil:Math.floor(Date.now()/1000)+300, messages:[{ address:txParams.to.toString({ bounceable:true, urlSafe:true }), amount:txParams.value.toString(), payload:txParams.body?.toBoc().toString('base64')??'' }] } });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
 });
 
-// ── TON Stakers APY/stats ─────────────────────────────────
-app.get('/tonstake/stats', async (req, res) => {
+app.get('/tonstake/stats', async (req,res) => {
   try {
-    const tonstakers = new Tonstakers({
-      tonApiKey: '',
-      tonClientParameters: { endpoint: 'https://toncenter.com/api/v2/jsonRPC' },
-    });
-    await tonstakers.init();
-    const [apy, tvl] = await Promise.all([
-      tonstakers.getCurrentApy(),
-      tonstakers.getTvl(),
-    ]);
-    res.json({ ok: true, apy, tvl });
-  } catch(e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
+    const ts = new Tonstakers({ tonApiKey:'', tonClientParameters:{ endpoint:'https://toncenter.com/api/v2/jsonRPC' } });
+    await ts.init();
+    const [apy,tvl] = await Promise.all([ts.getCurrentApy(),ts.getTvl()]);
+    res.json({ ok:true, apy, tvl });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
+// ── LIMIT ORDERS ──────────────────────────────────────────
 
+// Step 1: Get user's agent wallet address (create if new)
+app.post('/agent/address', async (req,res) => {
+  try {
+    const { userWallet } = req.body;
+    if(!userWallet) return res.status(400).json({ ok:false, error:'Missing userWallet' });
+    const { address } = await getUserWallet(userWallet);
+    res.json({ ok:true, address });
+  } catch(e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+// Step 2: Place limit order (after user has funded agent wallet)
+app.post('/limit/place', async (req,res) => {
+  try {
+    const { userWallet, tokenIn, tokenOut, amount, targetPrice, direction, tokenInSymbol, tokenOutSymbol } = req.body;
+    if(!userWallet||!tokenIn||!tokenOut||!amount||!targetPrice||!direction)
+      return res.status(400).json({ ok:false, error:'Missing fields' });
+    const { address:agentAddress } = await getUserWallet(userWallet);
+    const { data, error } = await supabase.from('limit_orders').insert({
+      user_wallet: userWallet,
+      agent_wallet: agentAddress,
+      token_in: tokenIn,
+      token_out: tokenOut,
+      token_in_symbol: tokenInSymbol||tokenIn,
+      token_out_symbol: tokenOutSymbol||tokenOut,
+      amount: parseFloat(amount),
+      target_price: parseFloat(targetPrice),
+      direction,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    }).select().single();
+    if(error) throw new Error(error.message);
+    res.json({ ok:true, order:data, agentAddress });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
+});
+
+// Get user's orders
+app.get('/limit/orders/:wallet', async (req,res) => {
+  try {
+    const { data, error } = await supabase.from('limit_orders').select('*').eq('user_wallet',req.params.wallet).order('created_at',{ ascending:false }).limit(20);
+    if(error) throw new Error(error.message);
+    res.json({ ok:true, orders:data });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
+});
+
+// Cancel order
+app.post('/limit/cancel/:id', async (req,res) => {
+  try {
+    const { error } = await supabase.from('limit_orders').update({ status:'cancelled' }).eq('id',req.params.id);
+    if(error) throw new Error(error.message);
+    res.json({ ok:true });
+  } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
+});
+
+// ── Price monitor loop ────────────────────────────────────
+async function checkLimitOrders() {
+  try {
+    const { data:orders } = await supabase.from('limit_orders').select('*').eq('status','pending');
+    if(!orders?.length) return;
+
+    for(const order of orders) {
+      try {
+        const offerAddr = order.token_in==='ton'?TON_NATIVE:order.token_in;
+        const askAddr   = order.token_out==='ton'?TON_NATIVE:order.token_out;
+        const units = String(BigInt(Math.round(order.amount*1e9)));
+
+        const su = new URL('https://api.ston.fi/v1/swap/simulate');
+        su.searchParams.set('offer_address',offerAddr);
+        su.searchParams.set('ask_address',askAddr);
+        su.searchParams.set('units',units);
+        su.searchParams.set('slippage_tolerance','0.02');
+        const sr = await fetch(su.toString(),{ method:'POST' });
+        if(!sr.ok) continue;
+        const sim = await sr.json();
+        if(!sim.ask_units||!sim.offer_units) continue;
+
+        const currentPrice = parseFloat(sim.ask_units)/parseFloat(sim.offer_units);
+        const shouldFill =
+          (order.direction==='buy'  && currentPrice<=order.target_price)||
+          (order.direction==='sell' && currentPrice>=order.target_price);
+        if(!shouldFill) continue;
+
+        console.log(`🎯 Order ${order.id} triggered! Price:${currentPrice} Target:${order.target_price}`);
+        await supabase.from('limit_orders').update({ status:'executing' }).eq('id',order.id);
+
+        // Get user's agent wallet and execute swap
+        const { wallet, contract, keyPair } = await getUserWallet(order.user_wallet);
+        const router = tonClient.open(new DEX.v1.Router());
+        const proxyTon = new pTON.v1();
+        const isTon = order.token_in==='ton';
+        const isTonAsk = order.token_out==='ton';
+
+        let txParams;
+        if(isTon) {
+          txParams = await router.getSwapTonToJettonTxParams({
+            userWalletAddress: wallet.address.toString(),
+            proxyTon, offerAmount:BigInt(Math.round(order.amount*1e9)),
+            askJettonAddress:order.token_out,
+            minAskAmount:BigInt(sim.min_ask_units||'1'), queryId:Date.now(),
+          });
+        } else if(isTonAsk) {
+          txParams = await router.getSwapJettonToTonTxParams({
+            userWalletAddress: wallet.address.toString(),
+            offerJettonAddress:order.token_in, offerAmount:BigInt(Math.round(order.amount*1e9)),
+            proxyTon, minAskAmount:BigInt(sim.min_ask_units||'1'), queryId:Date.now(),
+          });
+        } else {
+          txParams = await router.getSwapJettonToJettonTxParams({
+            userWalletAddress: wallet.address.toString(),
+            offerJettonAddress:order.token_in, offerAmount:BigInt(Math.round(order.amount*1e9)),
+            askJettonAddress:order.token_out,
+            minAskAmount:BigInt(sim.min_ask_units||'1'), queryId:Date.now(),
+          });
+        }
+
+        const seqno = await contract.getSeqno();
+        await contract.sendTransfer({
+          seqno, secretKey:keyPair.secretKey,
+          messages:[internal({ to:txParams.to, value:txParams.value, body:txParams.body })],
+        });
+
+        // After swap, send result back to user's main wallet
+        // (agent wallet now holds the output token — send it back)
+        await supabase.from('limit_orders').update({
+          status:'filled',
+          filled_at: new Date().toISOString(),
+          filled_price: currentPrice,
+        }).eq('id',order.id);
+
+        console.log(`✅ Order ${order.id} filled at ${currentPrice}`);
+      } catch(e) {
+        console.error(`Order ${order.id} error:`,e.message);
+        await supabase.from('limit_orders').update({ status:'failed' }).eq('id',order.id);
+      }
+    }
+  } catch(e) { console.error('Monitor error:',e.message); }
+}
+
+setInterval(checkLimitOrders, 30000);
+console.log('🤖 Limit order monitor running');
+
+const PORT = process.env.PORT||3000;
+app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
