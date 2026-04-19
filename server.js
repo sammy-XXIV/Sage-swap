@@ -6,7 +6,8 @@ import { WalletContractV4, internal } from '@ton/ton';
 import { createClient } from '@supabase/supabase-js';
 import { DEX, pTON, FARM, Client } from '@ston-fi/sdk';
 import { StonApiClient } from '@ston-fi/api';
-import { Tonstakers } from 'tonstakers-sdk';
+import pkg from 'tonstakers-sdk';
+const { Tonstakers } = pkg;
 
 const app = express();
 app.use(cors());
@@ -272,15 +273,59 @@ async function checkLimitOrders() {
           messages:[internal({ to:txParams.to, value:txParams.value, body:txParams.body })],
         });
 
-        // After swap, send result back to user's main wallet
-        // (agent wallet now holds the output token — send it back)
+        // Wait 15s for swap to settle, then send output back to user's main wallet
+        await new Promise(r => setTimeout(r, 15000));
+
+        const isTonOutput = order.token_out === 'ton';
+        const seqno2 = await contract.getSeqno();
+
+        if(isTonOutput) {
+          // Send TON back — get balance first, keep 0.05 TON for gas
+          const balRes = await fetch(`https://tonapi.io/v2/accounts/${wallet.address.toString({ bounceable:false, urlSafe:true })}`);
+          const balData = await balRes.json();
+          const bal = BigInt(balData?.balance||0);
+          const sendBack = bal - BigInt('50000000'); // keep 0.05 TON for gas
+          if(sendBack > 0n) {
+            await contract.sendTransfer({
+              seqno: seqno2, secretKey: keyPair.secretKey,
+              messages:[internal({ to: order.user_wallet, value: sendBack, body: '' })],
+            });
+          }
+        } else {
+          // Send jetton back to user's main wallet
+          const jetRes = await fetch(`https://tonapi.io/v2/accounts/${wallet.address.toString({ bounceable:false, urlSafe:true })}/jettons?currencies=usd`);
+          const jetData = await jetRes.json();
+          const outJetton = (jetData?.balances||[]).find(j => j.jetton?.address === order.token_out);
+          if(outJetton && BigInt(outJetton.balance) > 0n) {
+            // Build jetton transfer back to user
+            const sendBackRouter = tonClient.open(new DEX.v1.Router());
+            // Use a simple jetton transfer (not a swap)
+            const { Address, beginCell } = await import('@ton/ton');
+            const jettonWalletRes = await fetch(`https://api.ston.fi/v1/jetton/${order.token_out}/address?owner_address=${wallet.address.toString({ bounceable:false, urlSafe:true })}`);
+            const jettonWalletData = await jettonWalletRes.json();
+            if(jettonWalletData?.address) {
+              const transferBody = beginCell()
+                .storeUint(0x0f8a7ea5, 32).storeUint(Date.now(), 64)
+                .storeCoins(BigInt(outJetton.balance))
+                .storeAddress(Address.parse(order.user_wallet))
+                .storeAddress(Address.parse(wallet.address.toString()))
+                .storeBit(0).storeCoins(BigInt('1')).storeBit(0)
+                .endCell();
+              await contract.sendTransfer({
+                seqno: seqno2, secretKey: keyPair.secretKey,
+                messages:[internal({ to: jettonWalletData.address, value: BigInt('50000000'), body: transferBody })],
+              });
+            }
+          }
+        }
+
         await supabase.from('limit_orders').update({
           status:'filled',
           filled_at: new Date().toISOString(),
           filled_price: currentPrice,
         }).eq('id',order.id);
 
-        console.log(`✅ Order ${order.id} filled at ${currentPrice}`);
+        console.log(`✅ Order ${order.id} filled and funds sent back to user`);
       } catch(e) {
         console.error(`Order ${order.id} error:`,e.message);
         await supabase.from('limit_orders').update({ status:'failed' }).eq('id',order.id);
