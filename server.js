@@ -66,19 +66,30 @@ app.post('/build/swap', async (req,res) => {
     const isTon = !fromToken||fromToken==='ton';
     const isTonAsk = !toToken||toToken==='ton';
     const slip = parseFloat(slippage??0.01);
+
+    // Get decimals dynamically from STON.fi API
+    let fromDecimals = 9;
+    if(!isTon){
+      try{
+        const assetRes = await fetch(`https://api.ston.fi/v1/assets/${fromToken}`);
+        const assetData = await assetRes.json();
+        fromDecimals = assetData?.asset?.decimals ?? assetData?.decimals ?? 9;
+      }catch{}
+    }
+    const offerUnits = String(BigInt(Math.round(parseFloat(fromAmount) * Math.pow(10, fromDecimals))));
     const sim = await apiClient.simulateSwap({
       offerAddress: isTon?TON_NATIVE:fromToken,
       askAddress: isTonAsk?TON_NATIVE:toToken,
-      offerUnits: String(BigInt(Math.round(parseFloat(fromAmount)*1e9))),
+      offerUnits,
       slippageTolerance: String(slip),
     });
     if(!sim.askUnits) throw new Error('No liquidity for this pair');
     const router = tonClient.open(new DEX.v1.Router());
     const proxyTon = new pTON.v1();
     let txParams;
-    if(isTon) txParams = await router.getSwapTonToJettonTxParams({ userWalletAddress:walletAddress, proxyTon, offerAmount:BigInt(sim.offerUnits), askJettonAddress:toToken, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
-    else if(isTonAsk) txParams = await router.getSwapJettonToTonTxParams({ userWalletAddress:walletAddress, offerJettonAddress:fromToken, offerAmount:BigInt(sim.offerUnits), proxyTon, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
-    else txParams = await router.getSwapJettonToJettonTxParams({ userWalletAddress:walletAddress, offerJettonAddress:fromToken, offerAmount:BigInt(sim.offerUnits), askJettonAddress:toToken, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
+    if(isTon) txParams = await router.getSwapTonToJettonTxParams({ userWalletAddress:walletAddress, proxyTon, offerAmount:BigInt(offerUnits), askJettonAddress:toToken, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
+    else if(isTonAsk) txParams = await router.getSwapJettonToTonTxParams({ userWalletAddress:walletAddress, offerJettonAddress:fromToken, offerAmount:BigInt(offerUnits), proxyTon, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
+    else txParams = await router.getSwapJettonToJettonTxParams({ userWalletAddress:walletAddress, offerJettonAddress:fromToken, offerAmount:BigInt(offerUnits), askJettonAddress:toToken, minAskAmount:BigInt(sim.minAskUnits), queryId:Date.now() });
     const toAddress = txParams.to.toString({ bounceable:true, urlSafe:true });
     res.json({ ok:true, simulation:{ offerUnits:sim.offerUnits, askUnits:sim.askUnits, minAskUnits:sim.minAskUnits, swapRate:sim.swapRate, priceImpact:sim.priceImpact }, transaction:{ validUntil:Math.floor(Date.now()/1000)+300, messages:[{ address:toAddress, amount:txParams.value.toString(), payload:txParams.body?.toBoc().toString('base64')??'' }] } });
   } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
