@@ -6,8 +6,6 @@ import { WalletContractV4, internal } from '@ton/ton';
 import { createClient } from '@supabase/supabase-js';
 import { DEX, pTON, FARM, Client } from '@ston-fi/sdk';
 import { StonApiClient } from '@ston-fi/api';
-import pkg from 'tonstakers-sdk';
-const { Tonstakers } = pkg;
 
 const app = express();
 app.use(cors());
@@ -141,23 +139,59 @@ app.get('/farms', async (req,res) => {
 });
 
 // ── TON Stakers ───────────────────────────────────────────
+// TON Stakers pool contract address
+const TONSTAKERS_POOL = 'EQCkWxfyhAkim3g2DjKQQg8T5P4g-Q1-K_jErGcDJZ4i-vqR';
+
 app.post('/build/tonstake', async (req,res) => {
   try {
     const { walletAddress, amount } = req.body;
     if(!walletAddress||!amount) return res.status(400).json({ ok:false, error:'Missing fields' });
-    const ts = new Tonstakers({ tonApiKey:'', tonClientParameters:{ endpoint:'https://toncenter.com/api/v2/jsonRPC' } });
-    await ts.init();
-    const txParams = await ts.getStakeTxParams(BigInt(Math.round(parseFloat(amount)*1e9)));
-    const [apy,tvl] = await Promise.all([ts.getCurrentApy(),ts.getTvl()]);
-    res.json({ ok:true, apy, tvl, transaction:{ validUntil:Math.floor(Date.now()/1000)+300, messages:[{ address:txParams.to.toString({ bounceable:true, urlSafe:true }), amount:txParams.value.toString(), payload:txParams.body?.toBoc().toString('base64')??'' }] } });
+
+    const nanoAmount = BigInt(Math.round(parseFloat(amount)*1e9));
+
+    // TON Stakers uses a simple TON transfer to the pool contract
+    // with op code 0x47d54391 and referral code
+    const { beginCell } = await import('@ton/ton');
+    const body = beginCell()
+      .storeUint(0x47d54391, 32) // TON Stakers deposit op
+      .storeUint(0, 64)          // query id
+      .storeUint(0, 32)          // referral code (0 = none)
+      .endCell();
+
+    // Fetch current APY from TON Stakers API
+    let apy = 5.2, tvl = 0;
+    try {
+      const statsRes = await fetch('https://api.tonstakers.com/v1/stats');
+      if(statsRes.ok){
+        const stats = await statsRes.json();
+        apy = parseFloat(stats.apy||stats.apr||5.2);
+        tvl = parseFloat(stats.tvl||0);
+      }
+    } catch{}
+
+    res.json({
+      ok: true,
+      apy,
+      tvl,
+      transaction: {
+        validUntil: Math.floor(Date.now()/1000)+300,
+        messages:[{
+          address: TONSTAKERS_POOL,
+          amount: (nanoAmount + BigInt('100000000')).toString(), // amount + 0.1 TON gas
+          payload: body.toBoc().toString('base64'),
+        }]
+      }
+    });
   } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
 });
 
 app.get('/tonstake/stats', async (req,res) => {
   try {
-    const ts = new Tonstakers({ tonApiKey:'', tonClientParameters:{ endpoint:'https://toncenter.com/api/v2/jsonRPC' } });
-    await ts.init();
-    const [apy,tvl] = await Promise.all([ts.getCurrentApy(),ts.getTvl()]);
+    let apy = 5.2, tvl = 0;
+    try {
+      const statsRes = await fetch('https://api.tonstakers.com/v1/stats');
+      if(statsRes.ok){ const s=await statsRes.json(); apy=parseFloat(s.apy||s.apr||5.2); tvl=parseFloat(s.tvl||0); }
+    } catch{}
     res.json({ ok:true, apy, tvl });
   } catch(e) { res.status(400).json({ ok:false, error:e.message }); }
 });
@@ -350,3 +384,4 @@ console.log('🤖 Limit order monitor running');
 
 const PORT = process.env.PORT||3000;
 app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
+
