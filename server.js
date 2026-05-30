@@ -385,3 +385,148 @@ console.log('🤖 Limit order monitor running');
 const PORT = process.env.PORT||3000;
 app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
 
+
+// ── WHATSAPP WEBHOOK ──────────────────────────────────────
+
+const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || '';
+const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
+const WEBHOOK_VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || 'sage_webhook_secret_123';
+
+// Webhook verification (GET)
+app.get('/webhook/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
+    console.log('✅ WhatsApp webhook verified');
+    res.status(200).send(challenge);
+  } else {
+    console.log('❌ WhatsApp webhook verification failed');
+    res.status(403).json({ ok: false, error: 'Verification failed' });
+  }
+});
+
+// Send WhatsApp message
+async function sendWhatsAppMessage(recipientPhone, message, buttons = null) {
+  try {
+    const url = `https://graph.instagram.com/v18.0/${PHONE_NUMBER_ID}/messages`;
+    const payload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: recipientPhone.replace(/\D/g, ''),
+      type: buttons ? 'interactive' : 'text',
+    };
+
+    if (buttons) {
+      payload.interactive = {
+        type: 'button',
+        body: { text: message },
+        action: {
+          buttons: buttons.map((btn, i) => ({
+            type: 'reply',
+            reply: { id: `btn_${i}`, title: btn.label },
+          })),
+        },
+      };
+    } else {
+      payload.text = { body: message };
+    }
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || 'Failed to send');
+    console.log(`📤 WhatsApp message sent to ${recipientPhone}`);
+    return data;
+  } catch (e) {
+    console.error('❌ WhatsApp send error:', e.message);
+    throw e;
+  }
+}
+
+// Webhook message receiver (POST)
+app.post('/webhook/whatsapp', async (req, res) => {
+  try {
+    const body = req.body;
+
+    if (!body.object || body.object !== 'whatsapp_business_account') {
+      return res.status(400).json({ ok: false, error: 'Invalid webhook object' });
+    }
+
+    const changes = body.entry?.[0]?.changes?.[0];
+    if (!changes) return res.status(200).json({ ok: true });
+
+    const messages = changes.value?.messages || [];
+    const statuses = changes.value?.statuses || [];
+
+    // Handle message delivery/read status
+    for (const status of statuses) {
+      console.log(`📊 Message ${status.id} status: ${status.status}`);
+    }
+
+    // Handle incoming messages
+    for (const message of messages) {
+      const senderPhone = message.from;
+      const msgType = message.type;
+      let userInput = '';
+
+      if (msgType === 'text') {
+        userInput = message.text?.body || '';
+      } else if (msgType === 'button') {
+        userInput = message.button?.text || '';
+      } else {
+        // Handle other types (image, document, etc.)
+        console.log(`📎 Received ${msgType} from ${senderPhone}`);
+        await sendWhatsAppMessage(senderPhone, `Thanks for the ${msgType}! I currently support text commands.`);
+        continue;
+      }
+
+      console.log(`💬 Message from ${senderPhone}: ${userInput}`);
+
+      // Process user input (integrate with Claude AI or your logic)
+      const response = await handleWhatsAppUserInput(userInput, senderPhone);
+
+      // Send response with buttons
+      await sendWhatsAppMessage(senderPhone, response.text, response.buttons);
+    }
+
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error('Webhook error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Handle user input (TODO: integrate with Claude AI)
+async function handleWhatsAppUserInput(input, userPhone) {
+  const trimmed = input.trim().toLowerCase();
+
+  // Check if it's a contract address (CA)
+  if (trimmed.match(/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/)) {
+    // Looks like a TON address
+    return {
+      text: `🔍 Looking up token CA: ${trimmed}\n\n⏳ This feature is coming soon!`,
+      buttons: [
+        { label: '🔄 Refresh' },
+        { label: '⬅️ Back' },
+      ],
+    };
+  }
+
+  // Default response with menu
+  return {
+    text: 'Welcome to SAGE! 🤖\n\nWhat would you like to do?',
+    buttons: [
+      { label: '🔄 Swap Tokens' },
+      { label: '📊 Portfolio' },
+      { label: '⏱️ Limit Orders' },
+      { label: '💰 Stake' },
+    ],
+  };
+}
+
