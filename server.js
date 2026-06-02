@@ -1049,8 +1049,8 @@ async function startWhatsApp() {
       }
     } else if (connection === 'open') {
       intentionalClose = false;
-      reconnect440Count = 0;
       waConnected = true;
+      setTimeout(() => { reconnect440Count = 0; }, 30000); // only reset if stable for 30s
       currentQR = null;
       await supabase.from('whatsapp_auth').delete().eq('key', '_qr');
       lockHeartbeat = setInterval(renewLock, 20000);
