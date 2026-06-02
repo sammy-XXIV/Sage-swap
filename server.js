@@ -614,8 +614,13 @@ const sageTools = [
   },
   {
     name: 'lookup_token',
-    description: 'Look up a TON token by symbol or contract address. Returns price, TVL, and contract address.',
+    description: 'Look up a TON token by symbol or contract address. Returns price, 24h change, volume, liquidity, TVL, CA, and chart link.',
     input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+  },
+  {
+    name: 'get_trending_tokens',
+    description: 'Get the top trending tokens on STON.fi sorted by TVL. Returns name, price, TVL, and CA.',
+    input_schema: { type: 'object', properties: { limit: { type: 'number', description: 'Number of tokens to return (default 10)' } }, required: [] },
   },
   {
     name: 'get_swap_quote',
@@ -720,15 +725,57 @@ async function runSageTool(name, input) {
         asset = results.find(a => a.symbol?.toUpperCase() === query.toUpperCase()) || results[0];
       }
       if (!asset) return `No token found for "${query}"`;
+      const ca = asset.contractAddress;
+
+      // Enrich with DexScreener
+      let dex = {};
+      try {
+        const dsRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`);
+        const dsData = await dsRes.json();
+        const pair = dsData?.pairs?.find(p => p.chainId === 'ton') || dsData?.pairs?.[0];
+        if (pair) {
+          dex = {
+            price_usd: pair.priceUsd,
+            price_change_24h: pair.priceChange?.h24,
+            volume_24h: pair.volume?.h24 ? `$${Number(pair.volume.h24).toLocaleString()}` : null,
+            liquidity: pair.liquidity?.usd ? `$${Number(pair.liquidity.usd).toLocaleString()}` : null,
+            chart: `https://dexscreener.com/ton/${ca}`,
+          };
+        }
+      } catch {}
+
       return JSON.stringify({
         symbol: asset.symbol,
-        address: asset.contractAddress,
-        price_usd: asset.dexUsdPrice ? parseFloat(asset.dexUsdPrice).toFixed(8) : null,
-        tvl_usd: asset.dexUsdTvl ? Number(asset.dexUsdTvl).toLocaleString() : null,
-        blacklisted: asset.blacklisted,
+        name: asset.displayName,
+        address: ca,
+        price_usd: dex.price_usd || (asset.dexUsdPrice ? parseFloat(asset.dexUsdPrice).toFixed(8) : null),
+        price_change_24h: dex.price_change_24h ?? null,
+        volume_24h: dex.volume_24h || null,
+        liquidity: dex.liquidity || null,
+        tvl: asset.dexUsdTvl ? `$${Number(asset.dexUsdTvl).toLocaleString()}` : null,
+        chart: dex.chart || `https://dexscreener.com/ton/${ca}`,
       });
     } catch (e) {
       return `Error looking up token: ${e.message}`;
+    }
+  }
+
+  if (name === 'get_trending_tokens') {
+    try {
+      const limit = input.limit || 10;
+      const assets = await apiClient.queryAssets({ condition: 'whitelisted', limit: 50 });
+      const sorted = assets
+        .filter(a => a.dexUsdTvl && !a.blacklisted)
+        .sort((a, b) => Number(b.dexUsdTvl) - Number(a.dexUsdTvl))
+        .slice(0, limit);
+      return JSON.stringify(sorted.map(a => ({
+        symbol: a.symbol,
+        price_usd: a.dexUsdPrice ? parseFloat(a.dexUsdPrice).toFixed(6) : null,
+        tvl: a.dexUsdTvl ? `$${Number(a.dexUsdTvl).toLocaleString()}` : null,
+        address: a.contractAddress,
+      })));
+    } catch (e) {
+      return `Error fetching trending tokens: ${e.message}`;
     }
   }
 
