@@ -428,7 +428,7 @@ async function releaseLock() {
 }
 
 // Visit /qr?secret=YOUR_SECRET in browser to scan and connect WhatsApp
-app.get('/qr', (req, res) => {
+app.get('/qr', async (req, res) => {
   const QR_SECRET = process.env.QR_SECRET || '';
   if (!QR_SECRET || req.query.secret !== QR_SECRET) {
     return res.status(401).send('<html><body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff"><h1>🔒 Unauthorized</h1></body></html>');
