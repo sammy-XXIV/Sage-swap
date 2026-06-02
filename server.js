@@ -520,10 +520,11 @@ async function handleOnboarding(trimmed, lower, userJid) {
         pin: true,
         text: `✅ *Wallet created!*\n\n` +
               `📬 Your TON address:\n${address}\n\n` +
-              `🔑 *Seed phrase — screenshot this now:*\n${mnemonic.join(' ')}\n\n` +
+              `🔑 *Your seed phrase:*\n${mnemonic.join(' ')}\n\n` +
+              `✍️ Write these 24 words down somewhere safe — this message will be unrecoverable after 24 hours.\n` +
               `⚠️ Never share your seed phrase with anyone.\n\n` +
-              `📌 Pinning this message so you can always find your address.\n\n` +
-              `You're all set! What would you like to do?`
+              `💡 Type *seed phrase* within 24hrs if you need to see it again.\n\n` +
+              `📌 Pinning this message so you can always find your address.`
       };
     } catch (e) {
       return { text: `❌ Failed to create wallet: ${e.message}. Try again.` };
@@ -668,10 +669,20 @@ async function handleWhatsAppUserInput(input, userJid) {
     userSessions.set(userJid, { step: 'ready' });
   }
 
-  // Wallet shortcut — always available
+  // Wallet shortcuts — always available
   const lower = input.trim().toLowerCase();
   if (['wallet', 'my wallet', 'address', 'my address'].includes(lower)) {
     return { text: `📬 *Your TON Wallet*\n\n${walletRecord.agent_address}` };
+  }
+
+  if (['seed phrase', 'seed', 'my seed', 'show seed'].includes(lower)) {
+    const createdAt = new Date(walletRecord.created_at);
+    const hoursElapsed = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60);
+    if (hoursElapsed > 24) {
+      return { text: `🔒 Your seed phrase is no longer retrievable — it's been over 24 hours.\n\nIf you wrote it down you're safe. If not, you can *import* a new wallet or *generate* a fresh one.\n\n⚠️ Generating a new wallet will replace your current one.` };
+    }
+    const mnemonic = decrypt(walletRecord.encrypted_mnemonic);
+    return { text: `🔑 *Your seed phrase (write this down):*\n\n${mnemonic}\n\n⚠️ This will stop being accessible in ${Math.floor(24 - hoursElapsed)} hours. Never share these words.` };
   }
 
   if (!conversationHistory.has(userJid)) conversationHistory.set(userJid, []);
