@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
+import Anthropic from '@anthropic-ai/sdk';
 import { mnemonicToPrivateKey, mnemonicNew } from '@ton/crypto';
 import { WalletContractV4, internal } from '@ton/ton';
 import { createClient } from '@supabase/supabase-js';
@@ -425,54 +426,165 @@ async function sendWhatsAppMessage(jid, text) {
   await waSocket.sendMessage(jid, { text });
 }
 
-async function handleWhatsAppUserInput(input, userJid) {
-  const trimmed = input.trim();
-  const lower = trimmed.toLowerCase();
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' });
+const conversationHistory = new Map(); // per-user message history
 
-  if (!userSessions.has(userJid)) userSessions.set(userJid, { step: 'menu' });
+const SAGE_SYSTEM_PROMPT = `You are SAGE, a friendly and knowledgeable DeFi assistant running on WhatsApp for the TON blockchain. You help users with token lookups, swaps, staking, limit orders, and general DeFi questions.
 
-  // TON contract address lookup
-  if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(trimmed)) {
+You have access to these tools:
+- lookup_token: fetch live price and info for a TON token by symbol or contract address
+- get_swap_quote: simulate a swap between two tokens to show rates
+
+Personality: concise, helpful, no fluff. Use WhatsApp formatting (*bold*, _italic_). Keep replies short — this is a chat, not a document. Use emojis sparingly but naturally.
+
+Capabilities:
+- Token price lookup by symbol (e.g. "price of STON") or by pasting a contract address
+- Swap quotes (e.g. "how much USDT do I get for 5 TON?")
+- Limit orders: users can set a target price to auto-buy or auto-sell (backend handles execution)
+- Staking: TON Stakers pool, ~5.2% APY
+- General TON/DeFi education
+
+If a user asks to actually execute a swap or place a limit order, explain that they need to connect their wallet through the SAGE mini app, and that the WhatsApp bot handles info and monitoring.`;
+
+const sageTools = [
+  {
+    name: 'lookup_token',
+    description: 'Look up a TON token by symbol or contract address. Returns price, TVL, and contract address.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Token symbol (e.g. STON, USDT) or full contract address' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'get_swap_quote',
+    description: 'Get a swap quote between two tokens. Returns expected output amount and price impact.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        fromToken: { type: 'string', description: 'Symbol or address of token to swap from (use "TON" for native TON)' },
+        toToken: { type: 'string', description: 'Symbol or address of token to swap to (use "TON" for native TON)' },
+        amount: { type: 'number', description: 'Amount of fromToken to swap' },
+      },
+      required: ['fromToken', 'toToken', 'amount'],
+    },
+  },
+];
+
+async function runSageTool(name, input) {
+  if (name === 'lookup_token') {
     try {
-      const asset = await apiClient.getAsset(trimmed);
-      if (asset) {
-        const price = asset.dexUsdPrice ? `$${parseFloat(asset.dexUsdPrice).toFixed(6)}` : 'N/A';
-        const tvl = asset.dexUsdTvl ? `$${Number(asset.dexUsdTvl).toLocaleString()}` : 'N/A';
-        return {
-          text: `🔍 *${asset.symbol || 'Unknown Token'}*\n\n` +
-                `CA: ${trimmed}\n` +
-                `💲 Price: ${price}\n` +
-                `📊 TVL: ${tvl}\n\n` +
-                `Reply *menu* to go back.`
-        };
+      const { query } = input;
+      const isAddress = /^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(query);
+      let asset;
+      if (isAddress) {
+        asset = await apiClient.getAsset(query);
+      } else {
+        const results = await apiClient.queryAssets({ searchString: query, limit: 5 });
+        asset = results.find(a => a.symbol?.toUpperCase() === query.toUpperCase()) || results[0];
       }
-    } catch (e) { /* fall through */ }
-    return { text: `🔍 Couldn't find token info for that CA.\n\nReply *menu* to go back.` };
+      if (!asset) return `No token found for "${query}"`;
+      return JSON.stringify({
+        symbol: asset.symbol,
+        address: asset.contractAddress,
+        price_usd: asset.dexUsdPrice ? parseFloat(asset.dexUsdPrice).toFixed(8) : null,
+        tvl_usd: asset.dexUsdTvl ? Number(asset.dexUsdTvl).toLocaleString() : null,
+        blacklisted: asset.blacklisted,
+      });
+    } catch (e) {
+      return `Error looking up token: ${e.message}`;
+    }
   }
 
-  if (['menu', 'hi', 'hello', 'start', '/start', 'hey', 'back'].includes(lower)) {
-    userSessions.set(userJid, { step: 'menu' });
-    return {
-      text: `👋 Welcome to *SAGE*! 🤖\n\nYour DeFi assistant on TON blockchain.\n\n` +
-            `1️⃣ Swap Tokens\n2️⃣ Portfolio\n3️⃣ Limit Orders\n4️⃣ Stake TON\n\n` +
-            `Reply with a number, keyword, or paste a token contract address.`
-    };
+  if (name === 'get_swap_quote') {
+    try {
+      const { fromToken, toToken, amount } = input;
+      const resolveAddr = async (sym) => {
+        if (sym.toUpperCase() === 'TON') return TON_NATIVE;
+        if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
+        const results = await apiClient.queryAssets({ searchString: sym, limit: 5 });
+        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase()) || results[0];
+        if (!match) throw new Error(`Token "${sym}" not found`);
+        return match.contractAddress;
+      };
+      const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
+      const offerUnits = String(BigInt(Math.round(amount * 1e9)));
+      const sim = await apiClient.simulateSwap({
+        offerAddress: fromAddr,
+        askAddress: toAddr,
+        offerUnits,
+        slippageTolerance: '0.01',
+      });
+      const outAmount = (Number(sim.askUnits) / 1e9).toFixed(6);
+      return JSON.stringify({
+        from: fromToken,
+        to: toToken,
+        input_amount: amount,
+        output_amount: outAmount,
+        swap_rate: sim.swapRate,
+        price_impact: sim.priceImpact,
+        min_received: (Number(sim.minAskUnits) / 1e9).toFixed(6),
+      });
+    } catch (e) {
+      return `Error getting swap quote: ${e.message}`;
+    }
   }
 
-  if (lower === '1' || lower.includes('swap')) {
-    return { text: `🔄 *Swap Tokens*\n\nSend a command like:\n_swap 1 TON to USDT_\n\nOr paste a token contract address to look it up.\n\nReply *menu* to go back.` };
-  }
-  if (lower === '2' || lower.includes('portfolio')) {
-    return { text: `📊 *Portfolio*\n\nSend your TON wallet address to check your balance.\n\nReply *menu* to go back.` };
-  }
-  if (lower === '3' || lower.includes('limit')) {
-    return { text: `⏱️ *Limit Orders*\n\nAutomatic trades when price hits your target.\n\n⏳ Coming soon!\n\nReply *menu* to go back.` };
-  }
-  if (lower === '4' || lower.includes('stake')) {
-    return { text: `💰 *Stake TON*\n\nEarn ~5.2% APY with TON Stakers.\n\n⏳ WhatsApp staking UI coming soon!\n\nReply *menu* to go back.` };
-  }
+  return 'Unknown tool';
+}
 
-  return { text: `🤖 I didn't get that. Reply *menu* to see all options, or paste a token contract address.` };
+async function handleWhatsAppUserInput(input, userJid) {
+  if (!conversationHistory.has(userJid)) conversationHistory.set(userJid, []);
+  const history = conversationHistory.get(userJid);
+
+  history.push({ role: 'user', content: input });
+
+  // Keep last 10 messages to avoid token bloat
+  if (history.length > 10) history.splice(0, history.length - 10);
+
+  try {
+    let response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 500,
+      system: SAGE_SYSTEM_PROMPT,
+      tools: sageTools,
+      messages: history,
+    });
+
+    // Agentic tool use loop
+    while (response.stop_reason === 'tool_use') {
+      const toolUses = response.content.filter(b => b.type === 'tool_use');
+      const toolResults = await Promise.all(
+        toolUses.map(async (tu) => ({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: await runSageTool(tu.name, tu.input),
+        }))
+      );
+
+      history.push({ role: 'assistant', content: response.content });
+      history.push({ role: 'user', content: toolResults });
+
+      response = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 500,
+        system: SAGE_SYSTEM_PROMPT,
+        tools: sageTools,
+        messages: history,
+      });
+    }
+
+    const textBlock = response.content.find(b => b.type === 'text');
+    const reply = textBlock?.text || "I couldn't process that. Try again.";
+
+    history.push({ role: 'assistant', content: reply });
+    return { text: reply };
+  } catch (e) {
+    console.error('Claude error:', e.message);
+    return { text: '❌ Something went wrong on my end. Try again in a moment.' };
+  }
 }
 
 async function startWhatsApp() {

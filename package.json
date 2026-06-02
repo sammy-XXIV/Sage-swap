@@ -12,6 +12,7 @@
     "@supabase/supabase-js": "^2.39.0",
     "@ton/crypto": "^3.3.0",
     "@ton/ton": "^13.11.2",
+    "@anthropic-ai/sdk": "^0.36.3",
     "@whiskeysockets/baileys": "^6.7.18",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
