@@ -452,7 +452,8 @@ app.get('/qr', async (req, res) => {
   <p>Scan this QR code with your WhatsApp</p>
   <img src="${currentQR}" style="width:280px;height:280px;border-radius:12px;margin:20px auto;display:block" />
   <p style="color:#aaa;font-size:14px">WhatsApp → Settings → Linked Devices → Link a Device</p>
-  <p style="color:#555;font-size:12px">QR expires in ~30s — refresh if needed</p>
+  <p style="color:#555;font-size:12px">Auto-refreshing every 20 seconds</p>
+  <script>setTimeout(() => location.reload(), 20000)</script>
 </body>
 </html>`);
 });
@@ -1007,6 +1008,9 @@ async function startWhatsApp() {
     printQRInTerminal: true,
     logger: Pino({ level: 'silent' }),
     browser: ['SAGE Bot', 'Chrome', '120.0.0'],
+    keepAliveIntervalMs: 15000,
+    connectTimeoutMs: 60000,
+    retryRequestDelayMs: 2000,
   });
 
   waSocket = sock;
