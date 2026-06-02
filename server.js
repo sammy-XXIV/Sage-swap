@@ -5,7 +5,7 @@ import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaile
 import QRCode from 'qrcode';
 import Pino from 'pino';
 import Anthropic from '@anthropic-ai/sdk';
-import { mnemonicToPrivateKey, mnemonicNew } from '@ton/crypto';
+import { mnemonicToPrivateKey, mnemonicNew, mnemonicValidate } from '@ton/crypto';
 import { WalletContractV4, internal } from '@ton/ton';
 import { createClient } from '@supabase/supabase-js';
 import { DEX, pTON, FARM, Client } from '@ston-fi/sdk';
@@ -427,6 +427,119 @@ async function sendWhatsAppMessage(jid, text) {
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' });
+
+// ── WhatsApp Wallet Helpers ───────────────────────────────
+
+async function getWhatsAppWallet(jid) {
+  const { data } = await supabase
+    .from('agent_wallets')
+    .select('*')
+    .eq('user_wallet', `wa:${jid}`)
+    .single();
+  return data || null;
+}
+
+async function createWalletForUser(jid) {
+  const mnemonic = await mnemonicNew(24);
+  const keyPair = await mnemonicToPrivateKey(mnemonic);
+  const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+  const address = wallet.address.toString({ bounceable: false, urlSafe: true });
+  await supabase.from('agent_wallets').insert({
+    user_wallet: `wa:${jid}`,
+    agent_address: address,
+    encrypted_mnemonic: encrypt(mnemonic.join(' ')),
+    created_at: new Date().toISOString(),
+  });
+  return { address, mnemonic };
+}
+
+async function importWalletForUser(jid, mnemonicWords) {
+  const keyPair = await mnemonicToPrivateKey(mnemonicWords);
+  const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+  const address = wallet.address.toString({ bounceable: false, urlSafe: true });
+  const key = `wa:${jid}`;
+  const { data: existing } = await supabase.from('agent_wallets').select('id').eq('user_wallet', key).single();
+  if (existing) {
+    await supabase.from('agent_wallets').update({
+      agent_address: address,
+      encrypted_mnemonic: encrypt(mnemonicWords.join(' ')),
+    }).eq('user_wallet', key);
+  } else {
+    await supabase.from('agent_wallets').insert({
+      user_wallet: key,
+      agent_address: address,
+      encrypted_mnemonic: encrypt(mnemonicWords.join(' ')),
+      created_at: new Date().toISOString(),
+    });
+  }
+  return { address };
+}
+
+async function handleOnboarding(trimmed, lower, userJid) {
+  const session = userSessions.get(userJid);
+
+  // Waiting for seed phrase import
+  if (session?.step === 'awaiting_seed') {
+    const words = trimmed.trim().split(/\s+/);
+    if (words.length !== 24) {
+      return { text: `❌ That doesn't look right — a seed phrase is exactly *24 words*.\n\nPaste all 24 words separated by spaces, or type *cancel* to go back.` };
+    }
+    if (lower === 'cancel') {
+      userSessions.set(userJid, { step: 'onboarding' });
+      return { text: `↩️ Cancelled. Type *generate* to create a new wallet or *import* to try again.` };
+    }
+    const valid = await mnemonicValidate(words);
+    if (!valid) {
+      return { text: `❌ Invalid seed phrase. Please check your words and try again, or type *cancel* to go back.` };
+    }
+    try {
+      const { address } = await importWalletForUser(userJid, words);
+      userSessions.set(userJid, { step: 'ready' });
+      return {
+        text: `✅ *Wallet imported successfully!*\n\n` +
+              `📬 Your TON address:\n\`${address}\`\n\n` +
+              `You're all set! Ask me anything — swap tokens, check prices, set limit orders, and more.\n\n` +
+              `What would you like to do?`
+      };
+    } catch (e) {
+      return { text: `❌ Failed to import wallet: ${e.message}\n\nTry again or type *cancel*.` };
+    }
+  }
+
+  // Handle generate/import choice
+  if (lower === 'generate' || lower === '1') {
+    try {
+      const { address, mnemonic } = await createWalletForUser(userJid);
+      userSessions.set(userJid, { step: 'ready' });
+      return {
+        text: `✅ *Wallet created!*\n\n` +
+              `📬 Your TON address:\n\`${address}\`\n\n` +
+              `🔑 *Seed phrase (save this somewhere safe — screenshot it now):*\n\n` +
+              `${mnemonic.join(' ')}\n\n` +
+              `⚠️ Anyone with these words can access your wallet. Never share them.\n\n` +
+              `You're all set! What would you like to do?`
+      };
+    } catch (e) {
+      return { text: `❌ Failed to create wallet: ${e.message}. Try again.` };
+    }
+  }
+
+  if (lower === 'import' || lower === '2') {
+    userSessions.set(userJid, { step: 'awaiting_seed' });
+    return {
+      text: `📥 *Import Wallet*\n\nPaste your *24-word seed phrase* (all words separated by spaces):\n\n⚠️ Make sure you're in a private chat. Your seed phrase gives full wallet access.`
+    };
+  }
+
+  // Default welcome for new users
+  userSessions.set(userJid, { step: 'onboarding' });
+  return {
+    text: `👋 Welcome to *SAGE*! 🤖\n\nYour DeFi assistant on TON blockchain.\n\nTo get started, you need a TON wallet:\n\n` +
+          `1️⃣ *Generate* — create a new wallet (recommended)\n` +
+          `2️⃣ *Import* — use your existing wallet\n\n` +
+          `Reply *1* or *generate* / *2* or *import*`
+  };
+}
 const conversationHistory = new Map(); // per-user message history
 
 const SAGE_SYSTEM_PROMPT = `You are SAGE, a friendly and knowledgeable DeFi assistant running on WhatsApp for the TON blockchain. You help users with token lookups, swaps, staking, limit orders, and general DeFi questions.
@@ -536,6 +649,19 @@ async function runSageTool(name, input) {
 }
 
 async function handleWhatsAppUserInput(input, userJid) {
+  if (!userSessions.has(userJid)) userSessions.set(userJid, { step: 'onboarding' });
+
+  // Wallet gate — check Supabase first
+  const walletRecord = await getWhatsAppWallet(userJid);
+  if (!walletRecord) {
+    return handleOnboarding(input.trim(), input.trim().toLowerCase(), userJid);
+  }
+
+  // User has a wallet — mark session ready and proceed to Claude
+  if (userSessions.get(userJid)?.step !== 'ready') {
+    userSessions.set(userJid, { step: 'ready' });
+  }
+
   if (!conversationHistory.has(userJid)) conversationHistory.set(userJid, []);
   const history = conversationHistory.get(userJid);
 
@@ -545,10 +671,12 @@ async function handleWhatsAppUserInput(input, userJid) {
   if (history.length > 10) history.splice(0, history.length - 10);
 
   try {
+    const systemWithWallet = `${SAGE_SYSTEM_PROMPT}\n\nThis user's TON wallet address: ${walletRecord.agent_address}`;
+
     let response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 500,
-      system: SAGE_SYSTEM_PROMPT,
+      system: systemWithWallet,
       tools: sageTools,
       messages: history,
     });
@@ -570,7 +698,7 @@ async function handleWhatsAppUserInput(input, userJid) {
       response = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 500,
-        system: SAGE_SYSTEM_PROMPT,
+        system: systemWithWallet,
         tools: sageTools,
         messages: history,
       });
