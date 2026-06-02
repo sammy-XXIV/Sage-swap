@@ -397,6 +397,7 @@ let currentQR = null;
 let waConnected = false;
 let isStarting = false;
 let restartTimer = null;
+let intentionalClose = false;
 const userSessions = new Map();
 
 // Visit /qr?secret=YOUR_SECRET in browser to scan and connect WhatsApp
@@ -786,8 +787,10 @@ async function useSupabaseAuthState() {
 async function startWhatsApp() {
   if (isStarting) return;
   isStarting = true;
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
 
   if (waSocket) {
+    intentionalClose = true;
     try { waSocket.end(undefined); } catch (e) {}
     waSocket = null;
   }
@@ -822,6 +825,10 @@ async function startWhatsApp() {
       waConnected = false;
       currentQR = null;
       isStarting = false;
+      if (intentionalClose) {
+        intentionalClose = false;
+        return;
+      }
       const code = lastDisconnect?.error?.output?.statusCode;
       console.log(`WhatsApp closed (${code})`);
       if (code === DisconnectReason.loggedOut) {
@@ -831,6 +838,7 @@ async function startWhatsApp() {
       if (restartTimer) clearTimeout(restartTimer);
       restartTimer = setTimeout(startWhatsApp, 5000);
     } else if (connection === 'open') {
+      intentionalClose = false;
       waConnected = true;
       currentQR = null;
       console.log('✅ WhatsApp connected!');
