@@ -583,57 +583,98 @@ async function handleOnboarding(trimmed, lower, userJid) {
 }
 const conversationHistory = new Map(); // per-user message history
 
-const SAGE_SYSTEM_PROMPT = `You are SAGE, a friendly and knowledgeable DeFi assistant running on WhatsApp for the TON blockchain. You help users with token lookups, swaps, staking, limit orders, and general DeFi questions.
+const SAGE_SYSTEM_PROMPT = `You are SAGE, an autonomous DeFi AI agent on WhatsApp for the TON blockchain. You don't just answer questions — you actually execute trades, swaps, staking, and limit orders on behalf of the user using their SAGE wallet.
 
-You have access to these tools:
-- lookup_token: fetch live price and info for a TON token by symbol or contract address
-- get_swap_quote: simulate a swap between two tokens to show rates
+You have full access to:
+- get_wallet_balance: check the user's TON and token balances
+- lookup_token: get live price and info for any token
+- get_swap_quote: simulate a swap to show rates before executing
+- execute_swap: ACTUALLY execute a swap using the user's wallet
+- place_limit_order: set auto-trade when price hits a target
+- get_limit_orders: list active orders
+- cancel_limit_order: cancel an order
+- stake_ton: ACTUALLY stake TON to earn ~5.2% APY
 
-Personality: concise, helpful, no fluff. Use WhatsApp formatting (*bold*, _italic_). Keep replies short — this is a chat, not a document. Use emojis sparingly but naturally.
+Personality: confident, concise, action-oriented. You are an agent, not a chatbot. Use WhatsApp formatting (*bold*, _italic_). Keep replies tight.
 
-Capabilities:
-- Token price lookup by symbol (e.g. "price of STON") or by pasting a contract address
-- Swap quotes (e.g. "how much USDT do I get for 5 TON?")
-- Limit orders: users can set a target price to auto-buy or auto-sell (backend handles execution)
-- Staking: TON Stakers pool, ~5.2% APY
-- General TON/DeFi education
-
-If a user asks to actually execute a swap or place a limit order, explain that they need to connect their wallet through the SAGE mini app, and that the WhatsApp bot handles info and monitoring.`;
+Flow for swaps: get quote first → confirm with user → execute. Never execute without user confirmation.
+Flow for limit orders: confirm details → place immediately.
+Always pass the userJid from context when tools require it.`;
 
 const sageTools = [
   {
     name: 'get_wallet_balance',
-    description: 'Get the TON balance and jetton (token) holdings of the user\'s wallet.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        address: { type: 'string', description: 'The TON wallet address to check' },
-      },
-      required: ['address'],
-    },
+    description: "Get the user's SAGE wallet TON balance and all token holdings with USD values.",
+    input_schema: { type: 'object', properties: { address: { type: 'string' } }, required: ['address'] },
   },
   {
     name: 'lookup_token',
     description: 'Look up a TON token by symbol or contract address. Returns price, TVL, and contract address.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Token symbol (e.g. STON, USDT) or full contract address' },
-      },
-      required: ['query'],
-    },
+    input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
   },
   {
     name: 'get_swap_quote',
-    description: 'Get a swap quote between two tokens. Returns expected output amount and price impact.',
+    description: 'Get a swap quote between two tokens before executing.',
     input_schema: {
       type: 'object',
       properties: {
-        fromToken: { type: 'string', description: 'Symbol or address of token to swap from (use "TON" for native TON)' },
-        toToken: { type: 'string', description: 'Symbol or address of token to swap to (use "TON" for native TON)' },
-        amount: { type: 'number', description: 'Amount of fromToken to swap' },
+        fromToken: { type: 'string' },
+        toToken: { type: 'string' },
+        amount: { type: 'number' },
       },
       required: ['fromToken', 'toToken', 'amount'],
+    },
+  },
+  {
+    name: 'execute_swap',
+    description: 'Execute a real token swap using the user\'s SAGE wallet. Always get a quote first and confirm with user before calling this.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        fromToken: { type: 'string', description: 'Symbol or address to swap from (TON for native)' },
+        toToken: { type: 'string', description: 'Symbol or address to swap to (TON for native)' },
+        amount: { type: 'number', description: 'Amount of fromToken to swap' },
+        userJid: { type: 'string', description: 'User WhatsApp JID for wallet lookup' },
+      },
+      required: ['fromToken', 'toToken', 'amount', 'userJid'],
+    },
+  },
+  {
+    name: 'place_limit_order',
+    description: 'Place a limit order to auto-buy or auto-sell when price hits a target.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        fromToken: { type: 'string' },
+        toToken: { type: 'string' },
+        amount: { type: 'number' },
+        targetPrice: { type: 'number', description: 'Price at which to trigger the swap' },
+        direction: { type: 'string', enum: ['buy', 'sell'] },
+        userJid: { type: 'string' },
+      },
+      required: ['fromToken', 'toToken', 'amount', 'targetPrice', 'direction', 'userJid'],
+    },
+  },
+  {
+    name: 'get_limit_orders',
+    description: "Get the user's active limit orders.",
+    input_schema: { type: 'object', properties: { userJid: { type: 'string' } }, required: ['userJid'] },
+  },
+  {
+    name: 'cancel_limit_order',
+    description: 'Cancel a limit order by ID.',
+    input_schema: { type: 'object', properties: { orderId: { type: 'string' } }, required: ['orderId'] },
+  },
+  {
+    name: 'stake_ton',
+    description: 'Stake TON via TON Stakers to earn ~5.2% APY. Executes using the SAGE wallet.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: 'Amount of TON to stake' },
+        userJid: { type: 'string' },
+      },
+      required: ['amount', 'userJid'],
     },
   },
 ];
@@ -720,6 +761,93 @@ async function runSageTool(name, input) {
     }
   }
 
+  if (name === 'execute_swap') {
+    try {
+      const { fromToken, toToken, amount, userJid } = input;
+      const walletData = await getWhatsAppWallet(userJid);
+      if (!walletData) return 'No wallet found for this user.';
+      const mnemonic = decrypt(walletData.encrypted_mnemonic).split(' ');
+      const keyPair = await mnemonicToPrivateKey(mnemonic);
+      const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+      const contract = tonClient.open(wallet);
+      const resolveAddr = async (sym) => {
+        if (sym.toUpperCase() === 'TON') return TON_NATIVE;
+        if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
+        const results = await apiClient.queryAssets({ searchString: sym, limit: 5 });
+        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase()) || results[0];
+        if (!match) throw new Error(`Token "${sym}" not found`);
+        return match.contractAddress;
+      };
+      const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
+      const offerUnits = String(BigInt(Math.round(amount * 1e9)));
+      const sim = await apiClient.simulateSwap({ offerAddress: fromAddr, askAddress: toAddr, offerUnits, slippageTolerance: '0.01' });
+      if (!sim.askUnits) throw new Error('No liquidity for this pair');
+      const router = tonClient.open(new DEX.v1.Router());
+      const proxyTon = new pTON.v1();
+      const isTon = fromAddr === TON_NATIVE;
+      const isTonAsk = toAddr === TON_NATIVE;
+      let txParams;
+      if (isTon) txParams = await router.getSwapTonToJettonTxParams({ userWalletAddress: wallet.address.toString(), proxyTon, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
+      else if (isTonAsk) txParams = await router.getSwapJettonToTonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), proxyTon, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
+      else txParams = await router.getSwapJettonToJettonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
+      const seqno = await contract.getSeqno();
+      await contract.sendTransfer({ seqno, secretKey: keyPair.secretKey, messages: [internal({ to: txParams.to, value: txParams.value, body: txParams.body })] });
+      return JSON.stringify({ success: true, swapped: amount, from: fromToken, to: toToken, expected_out: (Number(sim.askUnits) / 1e9).toFixed(6) });
+    } catch (e) { return `Swap failed: ${e.message}`; }
+  }
+
+  if (name === 'place_limit_order') {
+    try {
+      const { fromToken, toToken, amount, targetPrice, direction, userJid } = input;
+      const walletData = await getWhatsAppWallet(userJid);
+      if (!walletData) return 'No wallet found.';
+      const { data, error } = await supabase.from('limit_orders').insert({
+        user_wallet: `wa:${userJid}`, agent_wallet: walletData.agent_address,
+        token_in: fromToken, token_out: toToken, token_in_symbol: fromToken, token_out_symbol: toToken,
+        amount: parseFloat(amount), target_price: parseFloat(targetPrice), direction, status: 'pending',
+        created_at: new Date().toISOString(),
+      }).select().single();
+      if (error) throw new Error(error.message);
+      return JSON.stringify({ success: true, order_id: data.id, message: `Limit order placed! Will ${direction} ${amount} ${fromToken} when price hits ${targetPrice}` });
+    } catch (e) { return `Failed to place order: ${e.message}`; }
+  }
+
+  if (name === 'get_limit_orders') {
+    try {
+      const { userJid } = input;
+      const { data, error } = await supabase.from('limit_orders').select('*').eq('user_wallet', `wa:${userJid}`).order('created_at', { ascending: false }).limit(10);
+      if (error) throw new Error(error.message);
+      return JSON.stringify(data?.map(o => ({ id: o.id, from: o.token_in_symbol, to: o.token_out_symbol, amount: o.amount, target_price: o.target_price, direction: o.direction, status: o.status })) || []);
+    } catch (e) { return `Failed to get orders: ${e.message}`; }
+  }
+
+  if (name === 'cancel_limit_order') {
+    try {
+      const { orderId } = input;
+      const { error } = await supabase.from('limit_orders').update({ status: 'cancelled' }).eq('id', orderId);
+      if (error) throw new Error(error.message);
+      return JSON.stringify({ success: true, message: 'Order cancelled.' });
+    } catch (e) { return `Failed to cancel: ${e.message}`; }
+  }
+
+  if (name === 'stake_ton') {
+    try {
+      const { amount, userJid } = input;
+      const walletData = await getWhatsAppWallet(userJid);
+      if (!walletData) return 'No wallet found.';
+      const mnemonic = decrypt(walletData.encrypted_mnemonic).split(' ');
+      const keyPair = await mnemonicToPrivateKey(mnemonic);
+      const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+      const contract = tonClient.open(wallet);
+      const { beginCell } = await import('@ton/ton');
+      const body = beginCell().storeUint(0x47d54391, 32).storeUint(0, 64).storeUint(0, 32).endCell();
+      const nanoAmount = BigInt(Math.round(amount * 1e9));
+      const seqno = await contract.getSeqno();
+      await contract.sendTransfer({ seqno, secretKey: keyPair.secretKey, messages: [internal({ to: TONSTAKERS_POOL, value: nanoAmount + BigInt('100000000'), body })] });
+      return JSON.stringify({ success: true, staked: amount, message: `${amount} TON staked via TON Stakers (~5.2% APY)` });
+    } catch (e) { return `Staking failed: ${e.message}`; }
+  }
+
   return 'Unknown tool';
 }
 
@@ -762,7 +890,7 @@ async function handleWhatsAppUserInput(input, userJid) {
   if (history.length > 10) history.splice(0, history.length - 10);
 
   try {
-    const systemWithWallet = `${SAGE_SYSTEM_PROMPT}\n\nThis user's TON wallet address: ${walletRecord.agent_address}`;
+    const systemWithWallet = `${SAGE_SYSTEM_PROMPT}\n\nUser context:\n- Wallet address: ${walletRecord.agent_address}\n- userJid: ${userJid} (use this when tools require userJid)`;
 
     let response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
