@@ -496,10 +496,11 @@ async function handleOnboarding(trimmed, lower, userJid) {
       const { address } = await importWalletForUser(userJid, words);
       userSessions.set(userJid, { step: 'ready' });
       return {
+        pin: true,
         text: `✅ *Wallet imported successfully!*\n\n` +
-              `📬 Your TON address:\n\`${address}\`\n\n` +
-              `You're all set! Ask me anything — swap tokens, check prices, set limit orders, and more.\n\n` +
-              `What would you like to do?`
+              `📬 Your TON address:\n${address}\n\n` +
+              `📌 Pinning this message so you can always find your address.\n\n` +
+              `You're all set! Ask me anything — swap, check prices, limit orders, and more.`
       };
     } catch (e) {
       return { text: `❌ Failed to import wallet: ${e.message}\n\nTry again or type *cancel*.` };
@@ -512,11 +513,12 @@ async function handleOnboarding(trimmed, lower, userJid) {
       const { address, mnemonic } = await createWalletForUser(userJid);
       userSessions.set(userJid, { step: 'ready' });
       return {
+        pin: true,
         text: `✅ *Wallet created!*\n\n` +
-              `📬 Your TON address:\n\`${address}\`\n\n` +
-              `🔑 *Seed phrase (save this somewhere safe — screenshot it now):*\n\n` +
-              `${mnemonic.join(' ')}\n\n` +
-              `⚠️ Anyone with these words can access your wallet. Never share them.\n\n` +
+              `📬 Your TON address:\n${address}\n\n` +
+              `🔑 *Seed phrase — screenshot this now:*\n${mnemonic.join(' ')}\n\n` +
+              `⚠️ Never share your seed phrase with anyone.\n\n` +
+              `📌 Pinning this message so you can always find your address.\n\n` +
               `You're all set! What would you like to do?`
       };
     } catch (e) {
@@ -662,6 +664,12 @@ async function handleWhatsAppUserInput(input, userJid) {
     userSessions.set(userJid, { step: 'ready' });
   }
 
+  // Wallet shortcut — always available
+  const lower = input.trim().toLowerCase();
+  if (['wallet', 'my wallet', 'address', 'my address'].includes(lower)) {
+    return { text: `📬 *Your TON Wallet*\n\n${walletRecord.agent_address}` };
+  }
+
   if (!conversationHistory.has(userJid)) conversationHistory.set(userJid, []);
   const history = conversationHistory.get(userJid);
 
@@ -767,10 +775,17 @@ async function startWhatsApp() {
       console.log(`💬 ${jid}: ${text}`);
       try {
         const response = await handleWhatsAppUserInput(text, jid);
-        await sendWhatsAppMessage(jid, response.text);
+        const sent = await sock.sendMessage(jid, { text: response.text });
+        if (response.pin && sent?.key) {
+          try {
+            await sock.pinMessage(jid, sent.key, 1);
+          } catch (e) {
+            console.log('Pin not supported:', e.message);
+          }
+        }
       } catch (e) {
         console.error('Handler error:', e.message);
-        await sendWhatsAppMessage(jid, '❌ Something went wrong. Try again.');
+        await sock.sendMessage(jid, { text: '❌ Something went wrong. Try again.' });
       }
     }
   });
