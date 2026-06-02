@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, decryptPollVote } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
 import Anthropic from '@anthropic-ai/sdk';
@@ -404,6 +404,7 @@ let reconnect440Count = 0;
 const INSTANCE_ID = Math.random().toString(36).substr(2, 9);
 const userSessions = new Map();
 const pendingImages = new Map(); // jid -> { buffer, caption }
+const pendingPolls = new Map();  // jid -> { msgKey, encKey, options, optionMap }
 
 async function acquireLock() {
   const now = new Date();
@@ -584,10 +585,12 @@ async function handleOnboarding(trimmed, lower, userJid) {
   // Default welcome for new users
   userSessions.set(userJid, { step: 'onboarding' });
   return {
-    text: `👋 Welcome to *SAGE*! 🤖\n\nYour DeFi assistant on TON blockchain.\n\nTo get started, you need a TON wallet:\n\n` +
-          `1️⃣ *Generate* — create a new wallet (recommended)\n` +
-          `2️⃣ *Import* — use your existing wallet\n\n` +
-          `Reply *1* or *generate* / *2* or *import*`
+    text: `👋 Welcome to *SAGE*!\n\nYour autonomous DeFi agent on TON. To get started, set up your wallet:`,
+    poll: {
+      question: 'How would you like to set up your wallet?',
+      options: ['🆕 Generate new wallet', '📥 Import existing wallet'],
+      optionMap: { '🆕 Generate new wallet': 'generate', '📥 Import existing wallet': 'import' },
+    },
   };
 }
 const conversationHistory = new Map(); // per-user message history
@@ -1317,31 +1320,96 @@ async function startWhatsApp() {
     }
   });
 
+  async function sendResponse(sock, jid, response) {
+    const sent = await sock.sendMessage(jid, { text: response.text });
+
+    // Send chart image if queued
+    if (pendingImages.has(jid)) {
+      const { buffer, caption } = pendingImages.get(jid);
+      pendingImages.delete(jid);
+      await sock.sendMessage(jid, { image: buffer, caption });
+    }
+
+    // Pin wallet address messages
+    if (response.pin && sent?.key) {
+      try { await sock.pinMessage(jid, sent.key, 1); } catch {}
+    }
+
+    // Send poll if response includes one (e.g. onboarding)
+    if (response.poll) {
+      await sendPoll(sock, jid, response.poll.question, response.poll.options, response.poll.optionMap);
+      return;
+    }
+
+    // Auto-send confirm poll whenever Claude asks "Confirm?"
+    if (/confirm\?/i.test(response.text)) {
+      await sendPoll(sock, jid,
+        'Proceed?',
+        ['✅ Confirm', '❌ Cancel'],
+        { '✅ Confirm': 'yes, confirmed', '❌ Cancel': 'cancel' }
+      );
+    }
+  }
+
+  async function sendPoll(sock, jid, question, options, optionMap) {
+    try {
+      const pollSent = await sock.sendMessage(jid, {
+        poll: { name: question, values: options, selectableCount: 1 },
+      });
+      const encKey = pollSent?.message?.pollCreationMessage?.encKey;
+      if (encKey) {
+        pendingPolls.set(jid, { msgKey: pollSent.key, encKey, options, optionMap });
+      }
+    } catch (e) {
+      console.error('Send poll error:', e.message);
+    }
+  }
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const msg of messages) {
       if (msg.key.fromMe || !msg.message) continue;
       const jid = msg.key.remoteJid;
       if (!jid) continue;
+
+      // ── Poll vote handler ──────────────────────────────────
+      if (msg.message?.pollUpdateMessage) {
+        const pollInfo = pendingPolls.get(jid);
+        if (!pollInfo) continue;
+        try {
+          const decrypted = decryptPollVote(msg.message.pollUpdateMessage.vote, {
+            pollCreatorJid: sock.user.id,
+            pollMsgId: pollInfo.msgKey.id,
+            pollEncKey: pollInfo.encKey,
+            voterJid: jid,
+          });
+          if (decrypted.selectedOptions?.length > 0) {
+            const selectedOption = pollInfo.options.find(opt => {
+              const hash = crypto.createHash('sha256').update(opt).digest();
+              return decrypted.selectedOptions.some(h => Buffer.from(h).equals(hash));
+            });
+            if (selectedOption) {
+              pendingPolls.delete(jid);
+              const input = pollInfo.optionMap?.[selectedOption] || selectedOption;
+              console.log(`🗳️ ${jid} voted: "${selectedOption}" → "${input}"`);
+              const response = await handleWhatsAppUserInput(input, jid);
+              await sendResponse(sock, jid, response);
+            }
+          }
+        } catch (e) {
+          console.error('Poll decrypt error:', e.message);
+        }
+        continue;
+      }
+
+      // ── Regular text message ───────────────────────────────
       const text = msg.message?.conversation ||
                    msg.message?.extendedTextMessage?.text || '';
       if (!text.trim()) continue;
       console.log(`💬 ${jid}: ${text}`);
       try {
         const response = await handleWhatsAppUserInput(text, jid);
-        const sent = await sock.sendMessage(jid, { text: response.text });
-        if (pendingImages.has(jid)) {
-          const { buffer, caption } = pendingImages.get(jid);
-          pendingImages.delete(jid);
-          await sock.sendMessage(jid, { image: buffer, caption });
-        }
-        if (response.pin && sent?.key) {
-          try {
-            await sock.pinMessage(jid, sent.key, 1);
-          } catch (e) {
-            console.log('Pin not supported:', e.message);
-          }
-        }
+        await sendResponse(sock, jid, response);
       } catch (e) {
         console.error('Handler error:', e.message);
         await sock.sendMessage(jid, { text: '❌ Something went wrong. Try again.' });
