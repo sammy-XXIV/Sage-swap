@@ -1,6 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import QRCode from 'qrcode';
+import Pino from 'pino';
 import { mnemonicToPrivateKey, mnemonicNew } from '@ton/crypto';
 import { WalletContractV4, internal } from '@ton/ton';
 import { createClient } from '@supabase/supabase-js';
@@ -386,147 +389,152 @@ const PORT = process.env.PORT||3000;
 app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
 
 
-// ── WHATSAPP WEBHOOK ──────────────────────────────────────
+// ── WHATSAPP (Baileys) ────────────────────────────────────
 
-const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || '';
-const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
-const WEBHOOK_VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || 'sage_webhook_secret_123';
+let waSocket = null;
+let currentQR = null;
+let waConnected = false;
+const userSessions = new Map();
 
-// Webhook verification (GET)
-app.get('/webhook/whatsapp', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
-    console.log('✅ WhatsApp webhook verified');
-    res.status(200).send(challenge);
-  } else {
-    console.log('❌ WhatsApp webhook verification failed');
-    res.status(403).json({ ok: false, error: 'Verification failed' });
+// Visit /qr in browser to scan and connect WhatsApp
+app.get('/qr', (req, res) => {
+  if (waConnected) {
+    return res.send('<html><body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff"><h1>✅ SAGE is connected to WhatsApp!</h1><p>The bot is active and ready.</p></body></html>');
   }
+  if (!currentQR) {
+    return res.send('<html><body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff"><h1>⏳ Generating QR Code...</h1><p>Refresh this page in a few seconds.</p></body></html>');
+  }
+  res.send(`<!DOCTYPE html>
+<html>
+<head><title>SAGE - Scan QR</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff">
+  <h1>🤖 Connect SAGE to WhatsApp</h1>
+  <p>Scan this QR code with your WhatsApp</p>
+  <img src="${currentQR}" style="width:280px;height:280px;border-radius:12px;margin:20px auto;display:block" />
+  <p style="color:#aaa;font-size:14px">WhatsApp → Settings → Linked Devices → Link a Device</p>
+  <p style="color:#555;font-size:12px">QR expires in ~30s — refresh if needed</p>
+</body>
+</html>`);
 });
 
-// Send WhatsApp message
-async function sendWhatsAppMessage(recipientPhone, message, buttons = null) {
-  try {
-    const url = `https://graph.instagram.com/v18.0/${PHONE_NUMBER_ID}/messages`;
-    const payload = {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to: recipientPhone.replace(/\D/g, ''),
-      type: buttons ? 'interactive' : 'text',
-    };
-
-    if (buttons) {
-      payload.interactive = {
-        type: 'button',
-        body: { text: message },
-        action: {
-          buttons: buttons.map((btn, i) => ({
-            type: 'reply',
-            reply: { id: `btn_${i}`, title: btn.label },
-          })),
-        },
-      };
-    } else {
-      payload.text = { body: message };
-    }
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error?.message || 'Failed to send');
-    console.log(`📤 WhatsApp message sent to ${recipientPhone}`);
-    return data;
-  } catch (e) {
-    console.error('❌ WhatsApp send error:', e.message);
-    throw e;
+async function sendWhatsAppMessage(jid, text) {
+  if (!waSocket || !waConnected) {
+    console.error('❌ WhatsApp not connected');
+    return;
   }
+  await waSocket.sendMessage(jid, { text });
 }
 
-// Webhook message receiver (POST)
-app.post('/webhook/whatsapp', async (req, res) => {
-  try {
-    const body = req.body;
+async function handleWhatsAppUserInput(input, userJid) {
+  const trimmed = input.trim();
+  const lower = trimmed.toLowerCase();
 
-    if (!body.object || body.object !== 'whatsapp_business_account') {
-      return res.status(400).json({ ok: false, error: 'Invalid webhook object' });
-    }
+  if (!userSessions.has(userJid)) userSessions.set(userJid, { step: 'menu' });
 
-    const changes = body.entry?.[0]?.changes?.[0];
-    if (!changes) return res.status(200).json({ ok: true });
-
-    const messages = changes.value?.messages || [];
-    const statuses = changes.value?.statuses || [];
-
-    // Handle message delivery/read status
-    for (const status of statuses) {
-      console.log(`📊 Message ${status.id} status: ${status.status}`);
-    }
-
-    // Handle incoming messages
-    for (const message of messages) {
-      const senderPhone = message.from;
-      const msgType = message.type;
-      let userInput = '';
-
-      if (msgType === 'text') {
-        userInput = message.text?.body || '';
-      } else if (msgType === 'button') {
-        userInput = message.button?.text || '';
-      } else {
-        // Handle other types (image, document, etc.)
-        console.log(`📎 Received ${msgType} from ${senderPhone}`);
-        await sendWhatsAppMessage(senderPhone, `Thanks for the ${msgType}! I currently support text commands.`);
-        continue;
+  // TON contract address lookup
+  if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(trimmed)) {
+    try {
+      const asset = await apiClient.getAsset(trimmed);
+      if (asset) {
+        const price = asset.dexUsdPrice ? `$${parseFloat(asset.dexUsdPrice).toFixed(6)}` : 'N/A';
+        const tvl = asset.dexUsdTvl ? `$${Number(asset.dexUsdTvl).toLocaleString()}` : 'N/A';
+        return {
+          text: `🔍 *${asset.symbol || 'Unknown Token'}*\n\n` +
+                `CA: ${trimmed}\n` +
+                `💲 Price: ${price}\n` +
+                `📊 TVL: ${tvl}\n\n` +
+                `Reply *menu* to go back.`
+        };
       }
-
-      console.log(`💬 Message from ${senderPhone}: ${userInput}`);
-
-      // Process user input (integrate with Claude AI or your logic)
-      const response = await handleWhatsAppUserInput(userInput, senderPhone);
-
-      // Send response with buttons
-      await sendWhatsAppMessage(senderPhone, response.text, response.buttons);
-    }
-
-    res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error('Webhook error:', e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    } catch (e) { /* fall through */ }
+    return { text: `🔍 Couldn't find token info for that CA.\n\nReply *menu* to go back.` };
   }
-});
 
-// Handle user input (TODO: integrate with Claude AI)
-async function handleWhatsAppUserInput(input, userPhone) {
-  const trimmed = input.trim().toLowerCase();
-
-  // Check if it's a contract address (CA)
-  if (trimmed.match(/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/)) {
-    // Looks like a TON address
+  if (['menu', 'hi', 'hello', 'start', '/start', 'hey', 'back'].includes(lower)) {
+    userSessions.set(userJid, { step: 'menu' });
     return {
-      text: `🔍 Looking up token CA: ${trimmed}\n\n⏳ This feature is coming soon!`,
-      buttons: [
-        { label: '🔄 Refresh' },
-        { label: '⬅️ Back' },
-      ],
+      text: `👋 Welcome to *SAGE*! 🤖\n\nYour DeFi assistant on TON blockchain.\n\n` +
+            `1️⃣ Swap Tokens\n2️⃣ Portfolio\n3️⃣ Limit Orders\n4️⃣ Stake TON\n\n` +
+            `Reply with a number, keyword, or paste a token contract address.`
     };
   }
 
-  // Default response with menu
-  return {
-    text: 'Welcome to SAGE! 🤖\n\nWhat would you like to do?',
-    buttons: [
-      { label: '🔄 Swap Tokens' },
-      { label: '📊 Portfolio' },
-      { label: '⏱️ Limit Orders' },
-      { label: '💰 Stake' },
-    ],
-  };
+  if (lower === '1' || lower.includes('swap')) {
+    return { text: `🔄 *Swap Tokens*\n\nSend a command like:\n_swap 1 TON to USDT_\n\nOr paste a token contract address to look it up.\n\nReply *menu* to go back.` };
+  }
+  if (lower === '2' || lower.includes('portfolio')) {
+    return { text: `📊 *Portfolio*\n\nSend your TON wallet address to check your balance.\n\nReply *menu* to go back.` };
+  }
+  if (lower === '3' || lower.includes('limit')) {
+    return { text: `⏱️ *Limit Orders*\n\nAutomatic trades when price hits your target.\n\n⏳ Coming soon!\n\nReply *menu* to go back.` };
+  }
+  if (lower === '4' || lower.includes('stake')) {
+    return { text: `💰 *Stake TON*\n\nEarn ~5.2% APY with TON Stakers.\n\n⏳ WhatsApp staking UI coming soon!\n\nReply *menu* to go back.` };
+  }
+
+  return { text: `🤖 I didn't get that. Reply *menu* to see all options, or paste a token contract address.` };
 }
+
+async function startWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: true,
+    logger: Pino({ level: 'silent' }),
+    browser: ['SAGE Bot', 'Chrome', '120.0.0'],
+  });
+
+  waSocket = sock;
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      try {
+        currentQR = await QRCode.toDataURL(qr);
+        waConnected = false;
+        console.log('📱 QR ready — visit /qr to scan');
+      } catch (e) { console.error('QR error:', e.message); }
+    }
+
+    if (connection === 'close') {
+      waConnected = false;
+      currentQR = null;
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = code !== DisconnectReason.loggedOut;
+      console.log(`WhatsApp closed (${code}), reconnect: ${shouldReconnect}`);
+      if (shouldReconnect) setTimeout(startWhatsApp, 5000);
+    } else if (connection === 'open') {
+      waConnected = true;
+      currentQR = null;
+      console.log('✅ WhatsApp connected!');
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      if (msg.key.fromMe || !msg.message) continue;
+      const jid = msg.key.remoteJid;
+      if (!jid) continue;
+      const text = msg.message?.conversation ||
+                   msg.message?.extendedTextMessage?.text || '';
+      if (!text.trim()) continue;
+      console.log(`💬 ${jid}: ${text}`);
+      try {
+        const response = await handleWhatsAppUserInput(text, jid);
+        await sendWhatsAppMessage(jid, response.text);
+      } catch (e) {
+        console.error('Handler error:', e.message);
+        await sendWhatsAppMessage(jid, '❌ Something went wrong. Try again.');
+      }
+    }
+  });
+}
+
+startWhatsApp().catch(console.error);
 
