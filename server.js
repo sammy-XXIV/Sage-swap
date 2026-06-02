@@ -395,6 +395,8 @@ app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
 let waSocket = null;
 let currentQR = null;
 let waConnected = false;
+let isStarting = false;
+let restartTimer = null;
 const userSessions = new Map();
 
 // Visit /qr?secret=YOUR_SECRET in browser to scan and connect WhatsApp
@@ -782,6 +784,14 @@ async function useSupabaseAuthState() {
 }
 
 async function startWhatsApp() {
+  if (isStarting) return;
+  isStarting = true;
+
+  if (waSocket) {
+    try { waSocket.end(undefined); } catch (e) {}
+    waSocket = null;
+  }
+
   const { state, saveCreds } = await useSupabaseAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
@@ -794,6 +804,7 @@ async function startWhatsApp() {
   });
 
   waSocket = sock;
+  isStarting = false;
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
@@ -810,13 +821,15 @@ async function startWhatsApp() {
     if (connection === 'close') {
       waConnected = false;
       currentQR = null;
+      isStarting = false;
       const code = lastDisconnect?.error?.output?.statusCode;
       console.log(`WhatsApp closed (${code})`);
       if (code === DisconnectReason.loggedOut) {
         console.log('🔄 Logged out — clearing session and generating new QR...');
         await supabase.from('whatsapp_auth').delete().neq('key', 'placeholder');
       }
-      setTimeout(startWhatsApp, 5000);
+      if (restartTimer) clearTimeout(restartTimer);
+      restartTimer = setTimeout(startWhatsApp, 5000);
     } else if (connection === 'open') {
       waConnected = true;
       currentQR = null;
