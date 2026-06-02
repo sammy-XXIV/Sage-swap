@@ -602,6 +602,17 @@ If a user asks to actually execute a swap or place a limit order, explain that t
 
 const sageTools = [
   {
+    name: 'get_wallet_balance',
+    description: 'Get the TON balance and jetton (token) holdings of the user\'s wallet.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: 'The TON wallet address to check' },
+      },
+      required: ['address'],
+    },
+  },
+  {
     name: 'lookup_token',
     description: 'Look up a TON token by symbol or contract address. Returns price, TVL, and contract address.',
     input_schema: {
@@ -628,6 +639,29 @@ const sageTools = [
 ];
 
 async function runSageTool(name, input) {
+  if (name === 'get_wallet_balance') {
+    try {
+      const { address } = input;
+      const [balRes, jetRes] = await Promise.all([
+        fetch(`https://tonapi.io/v2/accounts/${address}`),
+        fetch(`https://tonapi.io/v2/accounts/${address}/jettons?currencies=usd`),
+      ]);
+      const balData = await balRes.json();
+      const jetData = await jetRes.json();
+      const tonBalance = balData.balance ? (Number(balData.balance) / 1e9).toFixed(4) : '0';
+      const tokens = (jetData.balances || [])
+        .filter(j => Number(j.balance) > 0)
+        .map(j => ({
+          symbol: j.jetton?.symbol || 'Unknown',
+          balance: (Number(j.balance) / Math.pow(10, j.jetton?.decimals || 9)).toFixed(4),
+          usd_value: j.price?.prices?.USD ? `$${(Number(j.balance) / Math.pow(10, j.jetton?.decimals || 9) * j.price.prices.USD).toFixed(2)}` : null,
+        }));
+      return JSON.stringify({ ton_balance: tonBalance, tokens });
+    } catch (e) {
+      return `Error fetching balance: ${e.message}`;
+    }
+  }
+
   if (name === 'lookup_token') {
     try {
       const { query } = input;
