@@ -735,7 +735,7 @@ async function handleWhatsAppUserInput(input, userJid) {
     history.push({ role: 'assistant', content: reply });
     return { text: reply };
   } catch (e) {
-    console.error('Claude error:', e.message);
+    console.error('Claude error:', e.message, e.status, JSON.stringify(e.error || ''));
     return { text: '❌ Something went wrong on my end. Try again in a moment.' };
   }
 }
