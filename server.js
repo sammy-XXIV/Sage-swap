@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
 import Anthropic from '@anthropic-ai/sdk';
@@ -723,8 +723,51 @@ async function handleWhatsAppUserInput(input, userJid) {
   }
 }
 
+async function useSupabaseAuthState() {
+  const readData = async (key) => {
+    const { data } = await supabase.from('whatsapp_auth').select('value').eq('key', key).single();
+    if (!data?.value) return null;
+    return JSON.parse(JSON.stringify(data.value), BufferJSON.reviver);
+  };
+  const writeData = async (key, value) => {
+    await supabase.from('whatsapp_auth').upsert({ key, value: JSON.parse(JSON.stringify(value, BufferJSON.replacer)), updated_at: new Date().toISOString() });
+  };
+  const removeData = async (key) => {
+    await supabase.from('whatsapp_auth').delete().eq('key', key);
+  };
+
+  const creds = (await readData('creds')) || initAuthCreds();
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          await Promise.all(ids.map(async (id) => {
+            let val = await readData(`${type}-${id}`);
+            if (type === 'app-state-sync-key' && val) val = proto.Message.AppStateSyncKeyData.fromObject(val);
+            data[id] = val;
+          }));
+          return data;
+        },
+        set: async (data) => {
+          const tasks = [];
+          for (const category in data) {
+            for (const id in data[category]) {
+              const val = data[category][id];
+              tasks.push(val ? writeData(`${category}-${id}`, val) : removeData(`${category}-${id}`));
+            }
+          }
+          await Promise.all(tasks);
+        },
+      },
+    },
+    saveCreds: () => writeData('creds', creds),
+  };
+}
+
 async function startWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
+  const { state, saveCreds } = await useSupabaseAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
