@@ -763,38 +763,20 @@ async function runSageTool(name, input) {
   if (name === 'get_trending_tokens') {
     try {
       const limit = input.limit || 10;
-      // Use DexScreener TON trending pairs instead
-      const res = await fetch('https://api.dexscreener.com/latest/dex/tokens/ton');
+      const res = await fetch(`https://api.ston.fi/v1/assets?limit=100&blacklisted=false`);
       const data = await res.json();
-      if (!data?.pairs) {
-        // Fallback to STON.fi asset search
-        const assets = await apiClient.queryAssets({ searchString: '', limit: 50 });
-        const sorted = assets
-          .filter(a => a.dexUsdTvl && !a.blacklisted && a.symbol)
-          .sort((a, b) => Number(b.dexUsdTvl) - Number(a.dexUsdTvl))
-          .slice(0, limit);
-        return JSON.stringify(sorted.map(a => ({
-          symbol: a.symbol,
-          price_usd: a.dexUsdPrice ? parseFloat(a.dexUsdPrice).toFixed(6) : null,
-          tvl: a.dexUsdTvl ? `$${Number(a.dexUsdTvl).toLocaleString()}` : null,
-          address: a.contractAddress,
-        })));
-      }
-      const trending = data.pairs
-        .filter(p => p.chainId === 'ton' && p.volume?.h24 > 0)
-        .sort((a, b) => (b.volume?.h24 || 0) - (a.volume?.h24 || 0))
-        .slice(0, limit)
-        .map(p => ({
-          symbol: p.baseToken?.symbol,
-          name: p.baseToken?.name,
-          price_usd: p.priceUsd,
-          price_change_24h: p.priceChange?.h24,
-          volume_24h: p.volume?.h24 ? `$${Number(p.volume.h24).toLocaleString()}` : null,
-          liquidity: p.liquidity?.usd ? `$${Number(p.liquidity.usd).toLocaleString()}` : null,
-          address: p.baseToken?.address,
-          chart: `https://dexscreener.com/ton/${p.baseToken?.address}`,
-        }));
-      return JSON.stringify(trending);
+      const assets = data?.asset_list || data?.assets || data || [];
+      const sorted = (Array.isArray(assets) ? assets : [])
+        .filter(a => a.dex_usd_price && a.dex_usd_tvl && !a.blacklisted && a.symbol)
+        .sort((a, b) => Number(b.dex_usd_tvl) - Number(a.dex_usd_tvl))
+        .slice(0, limit);
+      return JSON.stringify(sorted.map(a => ({
+        symbol: a.symbol,
+        price_usd: a.dex_usd_price ? parseFloat(a.dex_usd_price).toFixed(6) : null,
+        tvl: a.dex_usd_tvl ? `$${Number(a.dex_usd_tvl).toLocaleString()}` : null,
+        address: a.contract_address,
+        chart: `https://dexscreener.com/ton/${a.contract_address}`,
+      })));
     } catch (e) {
       return `Error fetching trending tokens: ${e.message}`;
     }
