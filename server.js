@@ -608,12 +608,26 @@ Tools available:
 
 Tone: direct, clean, professional. No hype, no emojis unless the user uses them first. Use WhatsApp formatting (*bold* for numbers/amounts, _italic_ sparingly). Keep replies short and structured.
 
-Rules:
-- For swaps: show quote → ask "Confirm?" → execute only after yes
-- For limit orders: confirm details once → place
+STRICT RULES — follow exactly:
+
+SWAPS:
+1. Call get_swap_quote to get the rate
+2. Show the quote clearly: "Swap *X TOKEN* → *Y TOKEN* at rate Z. Confirm?"
+3. Call execute_swap ONLY after user replies yes/confirm/ok
+
+LIMIT ORDERS:
+1. If the request is ambiguous (e.g. "$20 worth", unclear token, unclear direction), ask for clarification FIRST. Do NOT guess.
+2. Understand: "buy TOKEN" = spend TON to get TOKEN. "sell TOKEN" = spend TOKEN to get TON. fromToken is what user spends, toToken is what user receives.
+3. "amount" is always in units of fromToken (the token being spent), not USD. If user says "$20 worth", you must first call lookup_token to get the current price, then calculate the equivalent token amount. Ask the user to confirm the calculated amount.
+4. Call get_wallet_balance to verify the user has enough fromToken before placing.
+5. Show the full order summary: "Limit order: Buy *X TOKEN* spending *Y TON* when price hits *Z*. You have *W TON* available. Confirm?"
+6. Call place_limit_order ONLY after user explicitly says yes/confirm/ok. NEVER call it immediately — always wait for confirmation.
+
+GENERAL:
 - Always pass userJid from context when tools need it
 - Never add filler phrases like "Time to load up" or motivational fluff
-- Format balances clearly: *2.5 TON* ($3.20), not paragraphs`;
+- Format balances clearly: *2.5 TON* ($3.20), not paragraphs
+- If balance is insufficient for a trade, tell the user and do not proceed`;
 
 const sageTools = [
   {
@@ -674,14 +688,14 @@ const sageTools = [
   },
   {
     name: 'place_limit_order',
-    description: 'Place a limit order to auto-buy or auto-sell when price hits a target.',
+    description: 'Place a limit order to auto-buy or auto-sell when price hits a target. IMPORTANT: Only call this AFTER the user has explicitly confirmed (yes/confirm/ok). fromToken = token being spent, toToken = token being received. amount = quantity of fromToken to spend (not USD). For a "buy TOKEN" order, fromToken=TON and toToken=TOKEN address. Always verify balance before calling.',
     input_schema: {
       type: 'object',
       properties: {
-        fromToken: { type: 'string' },
-        toToken: { type: 'string' },
-        amount: { type: 'number' },
-        targetPrice: { type: 'number', description: 'Price at which to trigger the swap' },
+        fromToken: { type: 'string', description: 'Token address or symbol being SPENT (e.g. TON when buying, token address when selling)' },
+        toToken: { type: 'string', description: 'Token address or symbol being RECEIVED' },
+        amount: { type: 'number', description: 'Amount of fromToken to spend (in token units, not USD)' },
+        targetPrice: { type: 'number', description: 'Price ratio (toToken per fromToken) at which to trigger' },
         direction: { type: 'string', enum: ['buy', 'sell'] },
         userJid: { type: 'string' },
       },
@@ -969,14 +983,58 @@ async function runSageTool(name, input) {
       const { fromToken, toToken, amount, targetPrice, direction, userJid } = input;
       const walletData = await getWhatsAppWallet(userJid);
       if (!walletData) return 'No wallet found.';
+
+      // Balance check before placing
+      const isTonFrom = !fromToken || fromToken.toUpperCase() === 'TON';
+      try {
+        const balRes = await fetch(`https://tonapi.io/v2/accounts/${walletData.agent_address}`);
+        const balData = await balRes.json();
+        const tonBalance = Number(balData.balance || 0) / 1e9;
+
+        if (isTonFrom) {
+          if (tonBalance < parseFloat(amount)) {
+            return JSON.stringify({ success: false, error: `Insufficient balance. You need ${amount} TON but only have ${tonBalance.toFixed(4)} TON. Fund your wallet first.` });
+          }
+        } else {
+          // Check jetton balance
+          const jetRes = await fetch(`https://tonapi.io/v2/accounts/${walletData.agent_address}/jettons?currencies=usd`);
+          const jetData = await jetRes.json();
+          const resolveAddr = async (sym) => {
+            if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
+            const results = await apiClient.queryAssets({ searchString: sym, limit: 5 });
+            const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase()) || results[0];
+            return match?.contractAddress || null;
+          };
+          const fromAddr = await resolveAddr(fromToken);
+          const jetton = fromAddr && (jetData.balances || []).find(j => j.jetton?.address === fromAddr);
+          const jetBal = jetton ? Number(jetton.balance) / Math.pow(10, jetton.jetton?.decimals || 9) : 0;
+          if (jetBal < parseFloat(amount)) {
+            return JSON.stringify({ success: false, error: `Insufficient balance. You need ${amount} ${fromToken} but only have ${jetBal.toFixed(4)}. Fund your wallet first.` });
+          }
+        }
+      } catch (balErr) {
+        console.warn('Balance check failed (non-blocking):', balErr.message);
+      }
+
+      // Resolve token symbols to addresses for storage
+      const resolveAddr = async (sym) => {
+        if (!sym || sym.toUpperCase() === 'TON') return 'ton';
+        if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
+        const results = await apiClient.queryAssets({ searchString: sym, limit: 5 });
+        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase()) || results[0];
+        return match?.contractAddress || sym;
+      };
+      const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
+
       const { data, error } = await supabase.from('limit_orders').insert({
         user_wallet: `wa:${userJid}`, agent_wallet: walletData.agent_address,
-        token_in: fromToken, token_out: toToken, token_in_symbol: fromToken, token_out_symbol: toToken,
+        token_in: fromAddr, token_out: toAddr,
+        token_in_symbol: fromToken.toUpperCase(), token_out_symbol: toToken.toUpperCase(),
         amount: parseFloat(amount), target_price: parseFloat(targetPrice), direction, status: 'pending',
         created_at: new Date().toISOString(),
       }).select().single();
       if (error) throw new Error(error.message);
-      return JSON.stringify({ success: true, order_id: data.id, message: `Limit order placed! Will ${direction} ${amount} ${fromToken} when price hits ${targetPrice}` });
+      return JSON.stringify({ success: true, order_id: data.id, message: `Order placed: ${direction} ${amount} ${fromToken.toUpperCase()} → ${toToken.toUpperCase()} when price hits ${targetPrice}` });
     } catch (e) { return `Failed to place order: ${e.message}`; }
   }
 
