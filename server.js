@@ -397,8 +397,12 @@ let currentQR = null;
 let waConnected = false;
 const userSessions = new Map();
 
-// Visit /qr in browser to scan and connect WhatsApp
+// Visit /qr?secret=YOUR_SECRET in browser to scan and connect WhatsApp
 app.get('/qr', (req, res) => {
+  const QR_SECRET = process.env.QR_SECRET || '';
+  if (!QR_SECRET || req.query.secret !== QR_SECRET) {
+    return res.status(401).send('<html><body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff"><h1>🔒 Unauthorized</h1></body></html>');
+  }
   if (waConnected) {
     return res.send('<html><body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff"><h1>✅ SAGE is connected to WhatsApp!</h1><p>The bot is active and ready.</p></body></html>');
   }
