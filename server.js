@@ -769,20 +769,34 @@ async function runSageTool(name, input) {
   if (name === 'get_trending_tokens') {
     try {
       const limit = input.limit || 10;
-      const res = await fetch(`https://api.ston.fi/v1/assets?limit=100&blacklisted=false`);
-      const data = await res.json();
-      const assets = data?.asset_list || data?.assets || data || [];
-      const sorted = (Array.isArray(assets) ? assets : [])
-        .filter(a => a.dex_usd_price && a.dex_usd_tvl && !a.blacklisted && a.symbol)
-        .sort((a, b) => Number(b.dex_usd_tvl) - Number(a.dex_usd_tvl))
+      const [poolsRes, assetsRes] = await Promise.all([
+        fetch('https://api.ston.fi/v1/pools?limit=100'),
+        fetch('https://api.ston.fi/v1/assets?limit=200'),
+      ]);
+      const poolsData = await poolsRes.json();
+      const assetsData = await assetsRes.json();
+      const assetMap = {};
+      for (const a of (assetsData?.asset_list || [])) {
+        assetMap[a.contract_address] = a;
+      }
+      const pools = (poolsData?.pool_list || [])
+        .filter(p => p.volume_24h_usd && Number(p.volume_24h_usd) > 0 && !p.deprecated)
+        .sort((a, b) => Number(b.volume_24h_usd) - Number(a.volume_24h_usd))
         .slice(0, limit);
-      return JSON.stringify(sorted.map(a => ({
-        symbol: a.symbol,
-        price_usd: a.dex_usd_price ? parseFloat(a.dex_usd_price).toFixed(6) : null,
-        tvl: a.dex_usd_tvl ? `$${Number(a.dex_usd_tvl).toLocaleString()}` : null,
-        address: a.contract_address,
-        chart: `https://dexscreener.com/ton/${a.contract_address}`,
-      })));
+
+      return JSON.stringify(pools.map(p => {
+        const t0 = assetMap[p.token0_address];
+        const t1 = assetMap[p.token1_address];
+        const token = t0?.symbol !== 'TON' ? t0 : t1;
+        return {
+          pair: `${t0?.symbol || '?'}/${t1?.symbol || '?'}`,
+          token_address: token?.contract_address,
+          volume_24h: `$${Number(p.volume_24h_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+          tvl: `$${Number(p.lp_total_supply_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+          apy_7d: p.apy_7d ? `${(Number(p.apy_7d) * 100).toFixed(2)}%` : null,
+          chart: token ? `https://dexscreener.com/ton/${token.contract_address}` : null,
+        };
+      }));
     } catch (e) {
       return `Error fetching trending tokens: ${e.message}`;
     }
