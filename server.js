@@ -403,6 +403,7 @@ let lockHeartbeat = null;
 let reconnect440Count = 0;
 const INSTANCE_ID = Math.random().toString(36).substr(2, 9);
 const userSessions = new Map();
+const pendingImages = new Map(); // jid -> { buffer, caption }
 
 async function acquireLock() {
   const now = new Date();
@@ -600,6 +601,8 @@ Tools available:
 - execute_swap: execute a real swap using the user's wallet
 - place_limit_order: set auto-trade at a target price
 - get_limit_orders: list active orders
+- get_token_chart: send a real price chart image for any timeframe (1h, 4h, 1d, 1w, 1m) — always use this when user asks for a chart
+- get_trending_tokens: top pools on STON.fi by 24h volume
 - cancel_limit_order: cancel an order by ID
 - stake_ton: stake TON for ~5.2% APY
 
@@ -622,6 +625,20 @@ const sageTools = [
     name: 'lookup_token',
     description: 'Look up a TON token by symbol or contract address. Returns price, 24h change, volume, liquidity, TVL, CA, and chart link.',
     input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+  },
+  {
+    name: 'get_token_chart',
+    description: 'Generate and send a price chart image for a token. Supports timeframes: 1h, 4h, 1d, 1w, 1m.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tokenAddress: { type: 'string', description: 'Token contract address' },
+        symbol: { type: 'string', description: 'Token symbol for the caption' },
+        timeframe: { type: 'string', description: 'Timeframe: 1h, 4h, 1d, 1w, 1m (default: 1d)' },
+        userJid: { type: 'string' },
+      },
+      required: ['tokenAddress', 'symbol', 'userJid'],
+    },
   },
   {
     name: 'get_trending_tokens',
@@ -763,6 +780,82 @@ async function runSageTool(name, input) {
       });
     } catch (e) {
       return `Error looking up token: ${e.message}`;
+    }
+  }
+
+  if (name === 'get_token_chart') {
+    try {
+      const { tokenAddress, symbol, timeframe = '1d', userJid } = input;
+
+      const tfMap = {
+        '1h': { interval: 'hour', limit: 24 },
+        '4h': { interval: 'hour', limit: 96 },
+        '1d': { interval: 'day', limit: 30 },
+        '1w': { interval: 'day', limit: 7 },
+        '1m': { interval: 'day', limit: 30 },
+      };
+      const { interval, limit } = tfMap[timeframe] || tfMap['1d'];
+
+      // Find pool on STON.fi for this token
+      const poolsRes = await fetch('https://api.ston.fi/v1/pools?limit=200');
+      const poolsData = await poolsRes.json();
+      const pool = (poolsData?.pool_list || []).find(p =>
+        p.token0_address === tokenAddress || p.token1_address === tokenAddress
+      );
+      if (!pool) return `No pool found for ${symbol}. Try looking up the token first.`;
+
+      // Fetch OHLCV from GeckoTerminal
+      const geckoRes = await fetch(
+        `https://api.geckoterminal.com/api/v2/networks/ton/pools/${pool.address}/ohlcv/${interval}?limit=${limit}`,
+        { headers: { 'Accept': 'application/json' } }
+      );
+      const geckoData = await geckoRes.json();
+      const ohlcv = geckoData?.data?.attributes?.ohlcv_list;
+      if (!ohlcv?.length) return `No price history available for ${symbol}.`;
+
+      const sorted = [...ohlcv].reverse();
+      const labels = sorted.map(([ts]) => {
+        const d = new Date(ts * 1000);
+        return interval === 'hour' ? `${d.getHours()}:00` : `${d.getMonth()+1}/${d.getDate()}`;
+      });
+      const closes = sorted.map(([,,,, c]) => parseFloat(c).toFixed(8));
+      const opens = sorted.map(([, o]) => parseFloat(o));
+      const isUp = parseFloat(closes[closes.length-1]) >= opens[0];
+
+      const chartConfig = {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            data: closes,
+            fill: true,
+            borderColor: isUp ? '#00e676' : '#ff5252',
+            backgroundColor: isUp ? 'rgba(0,230,118,0.08)' : 'rgba(255,82,82,0.08)',
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 2,
+          }],
+        },
+        options: {
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { maxTicksLimit: 6, color: '#aaa', font: { size: 10 } }, grid: { color: '#2a2a2a' } },
+            y: { ticks: { color: '#aaa', font: { size: 10 } }, grid: { color: '#2a2a2a' } },
+          },
+        },
+      };
+
+      const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&width=600&height=300&backgroundColor=%23111111`;
+      const imgRes = await fetch(chartUrl);
+      if (!imgRes.ok) return `Failed to generate chart image.`;
+      const buffer = Buffer.from(await imgRes.arrayBuffer());
+
+      const change = ((parseFloat(closes[closes.length-1]) - opens[0]) / opens[0] * 100).toFixed(2);
+      const caption = `📊 *${symbol}* · ${timeframe.toUpperCase()} · ${isUp ? '▲' : '▼'} ${change}%`;
+      pendingImages.set(userJid, { buffer, caption });
+      return `Chart ready for ${symbol} (${timeframe}).`;
+    } catch (e) {
+      return `Chart error: ${e.message}`;
     }
   }
 
@@ -1149,6 +1242,11 @@ async function startWhatsApp() {
       try {
         const response = await handleWhatsAppUserInput(text, jid);
         const sent = await sock.sendMessage(jid, { text: response.text });
+        if (pendingImages.has(jid)) {
+          const { buffer, caption } = pendingImages.get(jid);
+          pendingImages.delete(jid);
+          await sock.sendMessage(jid, { image: buffer, caption });
+        }
         if (response.pin && sent?.key) {
           try {
             await sock.pinMessage(jid, sent.key, 1);
