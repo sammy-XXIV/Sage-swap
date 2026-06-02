@@ -437,6 +437,10 @@ app.get('/qr', (req, res) => {
     return res.send('<html><body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff"><h1>✅ SAGE is connected to WhatsApp!</h1><p>The bot is active and ready.</p></body></html>');
   }
   if (!currentQR) {
+    const { data: stored } = await supabase.from('whatsapp_auth').select('value').eq('key', '_qr').single();
+    if (stored?.value?.data) currentQR = stored.value.data;
+  }
+  if (!currentQR) {
     return res.send('<html><body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff"><h1>⏳ Generating QR Code...</h1><p>Refresh this page in a few seconds.</p></body></html>');
   }
   res.send(`<!DOCTYPE html>
@@ -853,6 +857,7 @@ async function startWhatsApp() {
       try {
         currentQR = await QRCode.toDataURL(qr);
         waConnected = false;
+        await supabase.from('whatsapp_auth').upsert({ key: '_qr', value: { data: currentQR }, updated_at: new Date().toISOString() });
         console.log('📱 QR ready — visit /qr to scan');
       } catch (e) { console.error('QR error:', e.message); }
     }
@@ -885,6 +890,7 @@ async function startWhatsApp() {
       reconnect440Count = 0;
       waConnected = true;
       currentQR = null;
+      await supabase.from('whatsapp_auth').delete().eq('key', '_qr');
       lockHeartbeat = setInterval(renewLock, 20000);
       console.log('✅ WhatsApp connected!');
     }
