@@ -398,7 +398,34 @@ let waConnected = false;
 let isStarting = false;
 let restartTimer = null;
 let intentionalClose = false;
+let lockHeartbeat = null;
+let reconnect440Count = 0;
+const INSTANCE_ID = Math.random().toString(36).substr(2, 9);
 const userSessions = new Map();
+
+async function acquireLock() {
+  const expiry = new Date(Date.now() + 40000).toISOString();
+  const { data: existing } = await supabase.from('whatsapp_auth').select('value').eq('key', '_lock').single();
+  if (existing?.value) {
+    const lock = existing.value;
+    if (new Date(lock.expiry) > new Date() && lock.instanceId !== INSTANCE_ID) {
+      console.log(`Lock held by instance ${lock.instanceId}, waiting...`);
+      return false;
+    }
+  }
+  await supabase.from('whatsapp_auth').upsert({ key: '_lock', value: { instanceId: INSTANCE_ID, expiry }, updated_at: new Date().toISOString() });
+  const { data: check } = await supabase.from('whatsapp_auth').select('value').eq('key', '_lock').single();
+  return check?.value?.instanceId === INSTANCE_ID;
+}
+
+async function renewLock() {
+  const expiry = new Date(Date.now() + 40000).toISOString();
+  await supabase.from('whatsapp_auth').upsert({ key: '_lock', value: { instanceId: INSTANCE_ID, expiry }, updated_at: new Date().toISOString() });
+}
+
+async function releaseLock() {
+  await supabase.from('whatsapp_auth').delete().eq('key', '_lock');
+}
 
 // Visit /qr?secret=YOUR_SECRET in browser to scan and connect WhatsApp
 app.get('/qr', (req, res) => {
@@ -786,8 +813,17 @@ async function useSupabaseAuthState() {
 
 async function startWhatsApp() {
   if (isStarting) return;
+
+  const hasLock = await acquireLock();
+  if (!hasLock) {
+    if (restartTimer) clearTimeout(restartTimer);
+    restartTimer = setTimeout(startWhatsApp, 20000);
+    return;
+  }
+
   isStarting = true;
   if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+  if (lockHeartbeat) { clearInterval(lockHeartbeat); lockHeartbeat = null; }
 
   if (waSocket) {
     intentionalClose = true;
@@ -825,22 +861,31 @@ async function startWhatsApp() {
       waConnected = false;
       currentQR = null;
       isStarting = false;
-      if (intentionalClose) {
-        intentionalClose = false;
-        return;
-      }
+      if (lockHeartbeat) { clearInterval(lockHeartbeat); lockHeartbeat = null; }
+      if (intentionalClose) { intentionalClose = false; return; }
       const code = lastDisconnect?.error?.output?.statusCode;
       console.log(`WhatsApp closed (${code})`);
       if (code === DisconnectReason.loggedOut) {
-        console.log('🔄 Logged out — clearing session and generating new QR...');
-        await supabase.from('whatsapp_auth').delete().neq('key', 'placeholder');
+        console.log('🔄 Logged out — clearing session...');
+        await supabase.from('whatsapp_auth').delete().not('key', 'eq', '_lock');
       }
+      await releaseLock();
       if (restartTimer) clearTimeout(restartTimer);
-      restartTimer = setTimeout(startWhatsApp, 5000);
+      if (code === 440) {
+        reconnect440Count++;
+        const delay = Math.min(5000 * Math.pow(2, reconnect440Count), 120000) + Math.random() * 3000;
+        console.log(`440 conflict — backing off ${Math.round(delay/1000)}s`);
+        restartTimer = setTimeout(startWhatsApp, delay);
+      } else {
+        reconnect440Count = 0;
+        restartTimer = setTimeout(startWhatsApp, 5000);
+      }
     } else if (connection === 'open') {
       intentionalClose = false;
+      reconnect440Count = 0;
       waConnected = true;
       currentQR = null;
+      lockHeartbeat = setInterval(renewLock, 20000);
       console.log('✅ WhatsApp connected!');
     }
   });
