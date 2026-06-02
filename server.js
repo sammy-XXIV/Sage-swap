@@ -627,7 +627,9 @@ GENERAL:
 - Always pass userJid from context when tools need it
 - Never add filler phrases like "Time to load up" or motivational fluff
 - Format balances clearly: *2.5 TON* ($3.20), not paragraphs
-- If balance is insufficient for a trade, tell the user and do not proceed`;
+- If balance is insufficient for a trade, tell the user and do not proceed
+- When get_trending_tokens returns pre-formatted text, send it exactly as-is — do not reformat, do not add tables, do not add extra headers
+- Never use markdown tables (pipes |) — WhatsApp does not render them. Use numbered lists or line breaks instead`;
 
 const sageTools = [
   {
@@ -810,17 +812,24 @@ async function runSageTool(name, input) {
       };
       const { interval, limit } = tfMap[timeframe] || tfMap['1d'];
 
-      // Find pool on STON.fi for this token
-      const poolsRes = await fetch('https://api.ston.fi/v1/pools?limit=200');
-      const poolsData = await poolsRes.json();
-      const pool = (poolsData?.pool_list || []).find(p =>
-        p.token0_address === tokenAddress || p.token1_address === tokenAddress
+      // Get pool directly from GeckoTerminal (avoids address format mismatch with STON.fi)
+      const tokenPoolsRes = await fetch(
+        `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${tokenAddress}/pools?page=1`,
+        { headers: { 'Accept': 'application/json' } }
       );
-      if (!pool) return `No pool found for ${symbol}. Try looking up the token first.`;
+      const tokenPoolsData = await tokenPoolsRes.json();
+      const topPool = tokenPoolsData?.data?.[0];
+      if (!topPool) return `No trading pool found for ${symbol} on GeckoTerminal.`;
 
-      // Fetch OHLCV from GeckoTerminal
+      const poolAddress = topPool.attributes?.address;
+      const baseTokenId = topPool.relationships?.base_token?.data?.id || '';
+      // base_token id format: "ton_0:rawaddress" — check if our token is base or quote
+      const normalizedAddr = tokenAddress.replace(/^0:/, '').toLowerCase();
+      const isBase = baseTokenId.toLowerCase().includes(normalizedAddr);
+
+      // Fetch OHLCV using GeckoTerminal's own pool address
       const geckoRes = await fetch(
-        `https://api.geckoterminal.com/api/v2/networks/ton/pools/${pool.address}/ohlcv/${interval}?limit=${limit}`,
+        `https://api.geckoterminal.com/api/v2/networks/ton/pools/${poolAddress}/ohlcv/${interval}?limit=${limit}`,
         { headers: { 'Accept': 'application/json' } }
       );
       const geckoData = await geckoRes.json();
@@ -828,46 +837,69 @@ async function runSageTool(name, input) {
       if (!ohlcv?.length) return `No price history available for ${symbol}.`;
 
       const sorted = [...ohlcv].reverse();
+
+      // If our token is the quote token (not base), invert prices
+      const price = (raw) => {
+        const p = parseFloat(raw);
+        return isBase ? p : (p !== 0 ? 1 / p : 0);
+      };
+
       const labels = sorted.map(([ts]) => {
         const d = new Date(ts * 1000);
-        return interval === 'hour' ? `${d.getHours()}:00` : `${d.getMonth()+1}/${d.getDate()}`;
+        if (interval === 'hour') {
+          return `${d.getHours().toString().padStart(2,'0')}:00`;
+        }
+        return `${d.getMonth()+1}/${d.getDate()}`;
       });
-      const closes = sorted.map(([,,,, c]) => parseFloat(c).toFixed(8));
-      const opens = sorted.map(([, o]) => parseFloat(o));
-      const isUp = parseFloat(closes[closes.length-1]) >= opens[0];
+
+      const closes = sorted.map(([,,,, c]) => price(c));
+      const firstOpen = price(sorted[0][1]);
+      const lastClose = closes[closes.length - 1];
+      const isUp = lastClose >= firstOpen;
+
+      // Smart y-axis formatting
+      const maxPrice = Math.max(...closes);
+      const decimalPlaces = maxPrice < 0.0001 ? 8 : maxPrice < 0.01 ? 6 : maxPrice < 1 ? 4 : 2;
 
       const chartConfig = {
         type: 'line',
         data: {
           labels,
           datasets: [{
-            data: closes,
+            label: symbol,
+            data: closes.map(v => parseFloat(v.toFixed(decimalPlaces))),
             fill: true,
             borderColor: isUp ? '#00e676' : '#ff5252',
-            backgroundColor: isUp ? 'rgba(0,230,118,0.08)' : 'rgba(255,82,82,0.08)',
+            backgroundColor: isUp ? 'rgba(0,230,118,0.07)' : 'rgba(255,82,82,0.07)',
             tension: 0.3,
             pointRadius: 0,
             borderWidth: 2,
           }],
         },
         options: {
-          plugins: { legend: { display: false } },
+          legend: { display: false },
           scales: {
-            x: { ticks: { maxTicksLimit: 6, color: '#aaa', font: { size: 10 } }, grid: { color: '#2a2a2a' } },
-            y: { ticks: { color: '#aaa', font: { size: 10 } }, grid: { color: '#2a2a2a' } },
+            xAxes: [{
+              ticks: { maxTicksLimit: 6, fontColor: '#888', fontSize: 10 },
+              gridLines: { color: '#222' },
+            }],
+            yAxes: [{
+              ticks: { fontColor: '#888', fontSize: 10 },
+              gridLines: { color: '#222' },
+            }],
           },
         },
       };
 
-      const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&width=600&height=300&backgroundColor=%23111111`;
+      const chartUrl = `https://quickchart.io/chart?v=2&c=${encodeURIComponent(JSON.stringify(chartConfig))}&width=700&height=320&backgroundColor=%230d0d0d`;
       const imgRes = await fetch(chartUrl);
       if (!imgRes.ok) return `Failed to generate chart image.`;
       const buffer = Buffer.from(await imgRes.arrayBuffer());
 
-      const change = ((parseFloat(closes[closes.length-1]) - opens[0]) / opens[0] * 100).toFixed(2);
-      const caption = `📊 *${symbol}* · ${timeframe.toUpperCase()} · ${isUp ? '▲' : '▼'} ${change}%`;
+      const changePct = firstOpen !== 0 ? ((lastClose - firstOpen) / firstOpen * 100).toFixed(2) : '0.00';
+      const caption = `📊 *${symbol}* · ${timeframe.toUpperCase()} · ${isUp ? '▲' : '▼'} ${changePct}%`;
       pendingImages.set(userJid, { buffer, caption });
-      return `Chart ready for ${symbol} (${timeframe}).`;
+      return `Chart ready for ${symbol} (${timeframe}). Current price: ${lastClose.toFixed(decimalPlaces)}`;
     } catch (e) {
       return `Chart error: ${e.message}`;
     }
@@ -891,19 +923,17 @@ async function runSageTool(name, input) {
         .sort((a, b) => Number(b.volume_24h_usd) - Number(a.volume_24h_usd))
         .slice(0, limit);
 
-      return JSON.stringify(pools.map(p => {
+      const lines = pools.map((p, i) => {
         const t0 = assetMap[p.token0_address];
         const t1 = assetMap[p.token1_address];
-        const token = t0?.symbol !== 'TON' ? t0 : t1;
-        return {
-          pair: `${t0?.symbol || '?'}/${t1?.symbol || '?'}`,
-          token_address: token?.contract_address,
-          volume_24h: `$${Number(p.volume_24h_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
-          tvl: `$${Number(p.lp_total_supply_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
-          apy_7d: p.apy_7d ? `${(Number(p.apy_7d) * 100).toFixed(2)}%` : null,
-          chart: token ? `https://dexscreener.com/ton/${token.contract_address}` : null,
-        };
-      }));
+        const pair = `${t0?.symbol || '?'}/${t1?.symbol || '?'}`;
+        const vol = `$${Number(p.volume_24h_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+        const tvl = `$${Number(p.lp_total_supply_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+        const apy = p.apy_7d ? ` | APY ${(Number(p.apy_7d) * 100).toFixed(1)}%` : '';
+        return `${i+1}. *${pair}*\n   Vol: ${vol} | TVL: ${tvl}${apy}`;
+      });
+      return `*Top ${pools.length} on STON.fi by 24h Volume*\n\n${lines.join('\n\n')}`;
+
     } catch (e) {
       return `Error fetching trending tokens: ${e.message}`;
     }
