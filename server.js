@@ -60,6 +60,7 @@ async function getUserWallet(userWallet) {
 
 // ── Health ────────────────────────────────────────────────
 app.get('/ping', (req,res) => res.json({ ok:true, service:'SAGE Swap v2' }));
+app.get('/debug', (req,res) => res.json({ instanceId: INSTANCE_ID, waConnected, hasQR: !!currentQR, reconnect440Count }));
 
 // ── Swap ──────────────────────────────────────────────────
 app.post('/build/swap', async (req,res) => {
