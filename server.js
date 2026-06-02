@@ -796,9 +796,12 @@ async function startWhatsApp() {
       waConnected = false;
       currentQR = null;
       const code = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.log(`WhatsApp closed (${code}), reconnect: ${shouldReconnect}`);
-      if (shouldReconnect) setTimeout(startWhatsApp, 5000);
+      console.log(`WhatsApp closed (${code})`);
+      if (code === DisconnectReason.loggedOut) {
+        console.log('🔄 Logged out — clearing session and generating new QR...');
+        await supabase.from('whatsapp_auth').delete().neq('key', 'placeholder');
+      }
+      setTimeout(startWhatsApp, 5000);
     } else if (connection === 'open') {
       waConnected = true;
       currentQR = null;
