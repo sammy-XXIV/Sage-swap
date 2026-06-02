@@ -405,16 +405,22 @@ const INSTANCE_ID = Math.random().toString(36).substr(2, 9);
 const userSessions = new Map();
 
 async function acquireLock() {
+  const now = new Date();
   const expiry = new Date(Date.now() + 40000).toISOString();
   const { data: existing } = await supabase.from('whatsapp_auth').select('value').eq('key', '_lock').single();
   if (existing?.value) {
     const lock = existing.value;
-    if (new Date(lock.expiry) > new Date() && lock.instanceId !== INSTANCE_ID) {
+    const lockExpired = new Date(lock.expiry) <= now;
+    if (!lockExpired && lock.instanceId !== INSTANCE_ID) {
       console.log(`Lock held by instance ${lock.instanceId}, waiting...`);
       return false;
     }
+    if (lockExpired) {
+      console.log(`Stale lock from ${lock.instanceId} expired, taking over...`);
+    }
   }
   await supabase.from('whatsapp_auth').upsert({ key: '_lock', value: { instanceId: INSTANCE_ID, expiry }, updated_at: new Date().toISOString() });
+  await new Promise(r => setTimeout(r, 500));
   const { data: check } = await supabase.from('whatsapp_auth').select('value').eq('key', '_lock').single();
   return check?.value?.instanceId === INSTANCE_ID;
 }
