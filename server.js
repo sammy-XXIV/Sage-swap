@@ -784,12 +784,14 @@ async function runSageTool(name, input) {
       if (!asset) return `No token found for "${query}"`;
       const ca = asset.contractAddress;
 
-      // Enrich with DexScreener
+      // Enrich with DexScreener — pick highest liquidity TON pair
       let dex = {};
       try {
         const dsRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`);
         const dsData = await dsRes.json();
-        const pair = dsData?.pairs?.find(p => p.chainId === 'ton') || dsData?.pairs?.[0];
+        const tonPairs = (dsData?.pairs || []).filter(p => p.chainId === 'ton');
+        const pair = tonPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
+                  || dsData?.pairs?.[0];
         if (pair) {
           dex = {
             price_usd: pair.priceUsd,
