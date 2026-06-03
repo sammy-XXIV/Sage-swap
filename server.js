@@ -784,35 +784,13 @@ async function runSageTool(name, input) {
       if (!asset) return `No token found for "${query}"`;
       const ca = asset.contractAddress;
 
-      // Enrich with DexScreener — pick highest liquidity TON pair
-      let dex = {};
-      try {
-        const dsRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`);
-        const dsData = await dsRes.json();
-        const tonPairs = (dsData?.pairs || []).filter(p => p.chainId === 'ton');
-        const pair = tonPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
-                  || dsData?.pairs?.[0];
-        if (pair) {
-          dex = {
-            price_usd: pair.priceUsd,
-            price_change_24h: pair.priceChange?.h24,
-            volume_24h: pair.volume?.h24 ? `$${Number(pair.volume.h24).toLocaleString()}` : null,
-            liquidity: pair.liquidity?.usd ? `$${Number(pair.liquidity.usd).toLocaleString()}` : null,
-            chart: `https://dexscreener.com/ton/${ca}`,
-          };
-        }
-      } catch {}
-
       return JSON.stringify({
         symbol: asset.symbol,
         name: asset.displayName,
         address: ca,
-        price_usd: dex.price_usd || (asset.dexUsdPrice ? parseFloat(asset.dexUsdPrice).toFixed(8) : null),
-        price_change_24h: dex.price_change_24h ?? null,
-        volume_24h: dex.volume_24h || null,
-        liquidity: dex.liquidity || null,
+        price_usd: asset.dexUsdPrice ? parseFloat(asset.dexUsdPrice).toFixed(8) : null,
+        volume_24h: asset.stats?.['24h']?.volumeUsd ? `$${Number(asset.stats['24h'].volumeUsd).toLocaleString()}` : null,
         tvl: asset.dexUsdTvl ? `$${Number(asset.dexUsdTvl).toLocaleString()}` : null,
-        chart: dex.chart || `https://dexscreener.com/ton/${ca}`,
       });
     } catch (e) {
       return `Error looking up token: ${e.message}`;
