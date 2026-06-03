@@ -1143,8 +1143,12 @@ async function handleWhatsAppUserInput(input, userJid) {
 
   // Load history from Supabase (persists across redeploys)
   if (!conversationHistory.has(userJid)) {
-    const { data } = await supabase.from('conversation_history').select('messages').eq('jid', userJid).single();
-    conversationHistory.set(userJid, data?.messages || []);
+    try {
+      const { data } = await supabase.from('conversation_history').select('messages').eq('jid', userJid).single();
+      conversationHistory.set(userJid, data?.messages || []);
+    } catch {
+      conversationHistory.set(userJid, []);
+    }
   }
   const history = conversationHistory.get(userJid);
 
