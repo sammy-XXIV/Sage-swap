@@ -643,7 +643,8 @@ GENERAL:
 - Format balances clearly: *2.5 TON* ($3.20), not paragraphs
 - If balance is insufficient for a trade, tell the user and do not proceed
 - When get_trending_tokens returns pre-formatted text, send it exactly as-is — do not reformat, do not add tables, do not add extra headers
-- Never use markdown tables (pipes |) — WhatsApp does not render them. Use numbered lists or line breaks instead`;
+- Never use markdown tables (pipes |) — WhatsApp does not render them. Use numbered lists or line breaks instead
+- $TICKER notation is standard web3 — $NOT means the NOT token, $STON means STON, $DOGS means DOGS. Strip the $ and treat it as the token symbol`;
 
 const sageTools = [
   {
@@ -768,14 +769,17 @@ async function runSageTool(name, input) {
 
   if (name === 'lookup_token') {
     try {
-      const { query } = input;
+      const rawQuery = input.query;
+      const query = rawQuery.startsWith('$') ? rawQuery.slice(1) : rawQuery;
       const isAddress = /^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(query);
       let asset;
       if (isAddress) {
         asset = await apiClient.getAsset(query);
       } else {
-        const results = await apiClient.queryAssets({ searchString: query, limit: 5 });
-        asset = results.find(a => a.symbol?.toUpperCase() === query.toUpperCase()) || results[0];
+        const results = await apiClient.queryAssets({ searchString: query, limit: 20 });
+        asset = results.find(a => a.symbol?.toUpperCase() === query.toUpperCase())
+             || results.find(a => a.symbol?.toUpperCase().includes(query.toUpperCase()))
+             || results[0];
       }
       if (!asset) return `No token found for "${query}"`;
       const ca = asset.contractAddress;
@@ -956,11 +960,14 @@ async function runSageTool(name, input) {
   if (name === 'get_swap_quote') {
     try {
       const { fromToken, toToken, amount } = input;
-      const resolveAddr = async (sym) => {
+      const resolveAddr = async (rawSym) => {
+        const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
         if (sym.toUpperCase() === 'TON') return TON_NATIVE;
         if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
-        const results = await apiClient.queryAssets({ searchString: sym, limit: 5 });
-        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase()) || results[0];
+        const results = await apiClient.queryAssets({ searchString: sym, limit: 20 });
+        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase())
+                   || results.find(a => a.symbol?.toUpperCase().includes(sym.toUpperCase()))
+                   || results[0];
         if (!match) throw new Error(`Token "${sym}" not found`);
         return match.contractAddress;
       };
@@ -996,11 +1003,14 @@ async function runSageTool(name, input) {
       const keyPair = await mnemonicToPrivateKey(mnemonic);
       const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
       const contract = tonClient.open(wallet);
-      const resolveAddr = async (sym) => {
+      const resolveAddr = async (rawSym) => {
+        const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
         if (sym.toUpperCase() === 'TON') return TON_NATIVE;
         if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
-        const results = await apiClient.queryAssets({ searchString: sym, limit: 5 });
-        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase()) || results[0];
+        const results = await apiClient.queryAssets({ searchString: sym, limit: 20 });
+        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase())
+                   || results.find(a => a.symbol?.toUpperCase().includes(sym.toUpperCase()))
+                   || results[0];
         if (!match) throw new Error(`Token "${sym}" not found`);
         return match.contractAddress;
       };
