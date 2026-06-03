@@ -772,38 +772,34 @@ async function runSageTool(name, input) {
       const rawQuery = input.query;
       const query = (rawQuery.startsWith('$') ? rawQuery.slice(1) : rawQuery).trim();
 
-      // TON native price from tonapi.io
+      // TON native — use tonapi.io rates (same source as mini app portfolio)
       if (query.toUpperCase() === 'TON') {
         const ratesRes = await fetch('https://tonapi.io/v2/rates?tokens=ton&currencies=usd');
         const ratesData = await ratesRes.json();
         const price = ratesData?.rates?.TON?.prices?.USD;
         const diff24h = ratesData?.rates?.TON?.diff_24h?.USD;
-        return JSON.stringify({
-          symbol: 'TON',
-          name: 'Toncoin',
-          price_usd: price ? parseFloat(price).toFixed(4) : null,
-          price_change_24h: diff24h || null,
-        });
+        return JSON.stringify({ symbol: 'TON', name: 'Toncoin', price_usd: price ? String(price) : null, price_change_24h: diff24h || null });
       }
 
+      // Same logic as the working /search/token endpoint used by the mini app
       const isAddress = /^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(query);
       let asset;
       if (isAddress) {
         asset = await apiClient.getAsset(query);
       } else {
-        const results = await apiClient.queryAssets({ searchString: query, limit: 20 });
-        asset = results.find(a => a.symbol?.toUpperCase() === query.toUpperCase())
-             || results.find(a => a.symbol?.toUpperCase().includes(query.toUpperCase()))
+        const results = await apiClient.queryAssets({ searchString: query, limit: 10 });
+        asset = results.find(a => a.symbol?.toUpperCase() === query.toUpperCase() && a.dexUsdPrice && !a.blacklisted)
+             || results.find(a => a.symbol?.toUpperCase() === query.toUpperCase())
              || results[0];
       }
       if (!asset) return `No token found for "${query}"`;
-      const ca = asset.contractAddress;
 
       return JSON.stringify({
         symbol: asset.symbol,
         name: asset.displayName,
-        address: ca,
-        price_usd: asset.dexUsdPrice ? parseFloat(asset.dexUsdPrice).toFixed(8) : null,
+        address: asset.contractAddress,
+        decimals: asset.decimals ?? 9,
+        price_usd: asset.dexUsdPrice || null,
         tvl: asset.dexUsdTvl ? `$${Number(asset.dexUsdTvl).toLocaleString()}` : null,
       });
     } catch (e) {
@@ -958,9 +954,9 @@ async function runSageTool(name, input) {
         const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
         if (sym.toUpperCase() === 'TON') return TON_NATIVE;
         if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
-        const results = await apiClient.queryAssets({ searchString: sym, limit: 20 });
-        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase())
-                   || results.find(a => a.symbol?.toUpperCase().includes(sym.toUpperCase()))
+        const results = await apiClient.queryAssets({ searchString: sym, limit: 10 });
+        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase() && a.dexUsdPrice && !a.blacklisted)
+                   || results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase())
                    || results[0];
         if (!match) throw new Error(`Token "${sym}" not found`);
         return match.contractAddress;
@@ -1001,9 +997,9 @@ async function runSageTool(name, input) {
         const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
         if (sym.toUpperCase() === 'TON') return TON_NATIVE;
         if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
-        const results = await apiClient.queryAssets({ searchString: sym, limit: 20 });
-        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase())
-                   || results.find(a => a.symbol?.toUpperCase().includes(sym.toUpperCase()))
+        const results = await apiClient.queryAssets({ searchString: sym, limit: 10 });
+        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase() && a.dexUsdPrice && !a.blacklisted)
+                   || results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase())
                    || results[0];
         if (!match) throw new Error(`Token "${sym}" not found`);
         return match.contractAddress;
