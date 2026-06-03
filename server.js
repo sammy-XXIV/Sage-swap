@@ -60,7 +60,16 @@ async function getUserWallet(userWallet) {
 
 // ── Health ────────────────────────────────────────────────
 app.get('/ping', (req,res) => res.json({ ok:true, service:'SAGE Swap v2' }));
-app.get('/debug', (req,res) => res.json({ instanceId: INSTANCE_ID, waConnected, hasQR: !!currentQR, reconnect440Count }));
+app.get('/debug', (req,res) => res.json({
+  instanceId: INSTANCE_ID,
+  waConnected,
+  hasQR: !!currentQR,
+  reconnect440Count,
+  hasAnthropicKey: !!process.env.ANTHROPIC_API_KEY,
+  anthropicKeyPrefix: process.env.ANTHROPIC_API_KEY ? process.env.ANTHROPIC_API_KEY.slice(0,10) + '...' : 'NOT SET',
+  hasSupabaseUrl: !!process.env.SUPABASE_URL,
+  hasEncryptionKey: !!process.env.ENCRYPTION_KEY,
+}));
 
 // ── Swap ──────────────────────────────────────────────────
 app.post('/build/swap', async (req,res) => {
