@@ -770,7 +770,22 @@ async function runSageTool(name, input) {
   if (name === 'lookup_token') {
     try {
       const rawQuery = input.query;
-      const query = rawQuery.startsWith('$') ? rawQuery.slice(1) : rawQuery;
+      const query = (rawQuery.startsWith('$') ? rawQuery.slice(1) : rawQuery).trim();
+
+      // TON native price from tonapi.io
+      if (query.toUpperCase() === 'TON') {
+        const ratesRes = await fetch('https://tonapi.io/v2/rates?tokens=ton&currencies=usd');
+        const ratesData = await ratesRes.json();
+        const price = ratesData?.rates?.TON?.prices?.USD;
+        const diff24h = ratesData?.rates?.TON?.diff_24h?.USD;
+        return JSON.stringify({
+          symbol: 'TON',
+          name: 'Toncoin',
+          price_usd: price ? parseFloat(price).toFixed(4) : null,
+          price_change_24h: diff24h || null,
+        });
+      }
+
       const isAddress = /^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(query);
       let asset;
       if (isAddress) {
@@ -789,7 +804,6 @@ async function runSageTool(name, input) {
         name: asset.displayName,
         address: ca,
         price_usd: asset.dexUsdPrice ? parseFloat(asset.dexUsdPrice).toFixed(8) : null,
-        volume_24h: asset.stats?.['24h']?.volumeUsd ? `$${Number(asset.stats['24h'].volumeUsd).toLocaleString()}` : null,
         tvl: asset.dexUsdTvl ? `$${Number(asset.dexUsdTvl).toLocaleString()}` : null,
       });
     } catch (e) {
