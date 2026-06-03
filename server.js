@@ -1444,5 +1444,32 @@ async function startWhatsApp() {
   });
 }
 
-startWhatsApp().catch(console.error);
+// Clean shutdown on redeploy — close WhatsApp before dying so new instance can connect cleanly
+async function gracefulShutdown() {
+  console.log('🛑 Shutting down — closing WhatsApp...');
+  intentionalClose = true;
+  if (lockHeartbeat) clearInterval(lockHeartbeat);
+  if (restartTimer) clearTimeout(restartTimer);
+  try { if (waSocket) waSocket.end(undefined); } catch {}
+  await releaseLock();
+  console.log('✅ Lock released, exiting.');
+  process.exit(0);
+}
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
+// Reconnect endpoint — restores session from Supabase without QR
+app.post('/reconnect', async (req, res) => {
+  const secret = req.headers['x-secret'] || req.query.secret;
+  if (secret !== (process.env.QR_SECRET || '')) return res.status(401).json({ ok: false });
+  console.log('🔄 Manual reconnect triggered');
+  isStarting = false;
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = setTimeout(() => startWhatsApp().catch(console.error), 1000);
+  res.json({ ok: true, message: 'Reconnecting...' });
+});
+
+// Delay startup to let previous instance release lock first
+setTimeout(() => startWhatsApp().catch(console.error), 8000);
+console.log('⏳ Waiting 8s for previous instance to shut down...');
 
