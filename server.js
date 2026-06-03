@@ -644,7 +644,8 @@ GENERAL:
 - If balance is insufficient for a trade, tell the user and do not proceed
 - When get_trending_tokens returns pre-formatted text, send it exactly as-is — do not reformat, do not add tables, do not add extra headers
 - Never use markdown tables (pipes |) — WhatsApp does not render them. Use numbered lists or line breaks instead
-- $TICKER notation is standard web3 — $NOT means the NOT token, $STON means STON, $DOGS means DOGS. Strip the $ and treat it as the token symbol`;
+- $TICKER notation is standard web3 — $NOT means the NOT token, $STON means STON, $DOGS means DOGS. Strip the $ and treat it as the token symbol
+- lookup_token works for ALL tokens including TON itself. ALWAYS call it for any price question — never tell the user to check Binance/CoinGecko/external sites`;
 
 const sageTools = [
   {
