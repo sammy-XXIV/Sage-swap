@@ -20,6 +20,29 @@ const tonClient = new Client({ endpoint: 'https://toncenter.com/api/v2/jsonRPC' 
 const supabase = createClient(process.env.SUPABASE_URL||'', process.env.SUPABASE_KEY||'');
 const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
 
+// Asset cache — STON.fi search API is broken, so we cache top assets and filter client-side
+let assetCache = null;
+let assetCacheTime = 0;
+const ASSET_CACHE_TTL = 5 * 60 * 1000; // 5 min
+
+async function getAssets() {
+  if (assetCache && Date.now() - assetCacheTime < ASSET_CACHE_TTL) return assetCache;
+  const res = await fetch('https://api.ston.fi/v1/assets?limit=500');
+  const data = await res.json();
+  assetCache = (data.asset_list || []).filter(a => !a.blacklisted && a.dex_usd_price);
+  assetCacheTime = Date.now();
+  return assetCache;
+}
+
+async function findAssetBySymbol(symbol) {
+  const upper = symbol.toUpperCase();
+  const assets = await getAssets();
+  const matches = assets.filter(a => a.symbol?.toUpperCase() === upper);
+  if (!matches.length) return null;
+  // Pick most popular (highest popularity_index = most liquid/real token)
+  return matches.sort((a, b) => (b.popularity_index || 0) - (a.popularity_index || 0))[0];
+}
+
 // ── Encryption ────────────────────────────────────────────
 function encrypt(text) {
   const iv = crypto.randomBytes(16);
@@ -782,26 +805,23 @@ async function runSageTool(name, input) {
         return JSON.stringify({ symbol: 'TON', name: 'Toncoin', price_usd: price ? String(price) : null, price_change_24h: diff24h || null });
       }
 
-      // Same logic as the working /search/token endpoint used by the mini app
       const isAddress = /^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(query);
       let asset;
       if (isAddress) {
-        asset = await apiClient.getAsset(query);
+        const res = await fetch(`https://api.ston.fi/v1/assets/${query}`);
+        asset = await res.json();
+        if (asset?.asset) asset = asset.asset;
       } else {
-        const results = await apiClient.queryAssets({ searchString: query, limit: 10 });
-        asset = results.find(a => a.symbol?.toUpperCase() === query.toUpperCase() && a.dexUsdPrice && !a.blacklisted)
-             || results.find(a => a.symbol?.toUpperCase() === query.toUpperCase())
-             || results[0];
+        asset = await findAssetBySymbol(query);
       }
       if (!asset) return `No token found for "${query}"`;
 
       return JSON.stringify({
         symbol: asset.symbol,
-        name: asset.displayName,
-        address: asset.contractAddress,
+        name: asset.display_name,
+        address: asset.contract_address,
         decimals: asset.decimals ?? 9,
-        price_usd: asset.dexUsdPrice || null,
-        tvl: asset.dexUsdTvl ? `$${Number(asset.dexUsdTvl).toLocaleString()}` : null,
+        price_usd: asset.dex_usd_price || null,
       });
     } catch (e) {
       return `Error looking up token: ${e.message}`;
@@ -955,12 +975,9 @@ async function runSageTool(name, input) {
         const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
         if (sym.toUpperCase() === 'TON') return TON_NATIVE;
         if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
-        const results = await apiClient.queryAssets({ searchString: sym, limit: 10 });
-        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase() && a.dexUsdPrice && !a.blacklisted)
-                   || results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase())
-                   || results[0];
-        if (!match) throw new Error(`Token "${sym}" not found`);
-        return match.contractAddress;
+        const match = await findAssetBySymbol(sym);
+        if (!match) throw new Error(`Token "${sym}" not found on STON.fi`);
+        return match.contract_address;
       };
       const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
       const offerUnits = String(BigInt(Math.round(amount * 1e9)));
@@ -998,12 +1015,9 @@ async function runSageTool(name, input) {
         const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
         if (sym.toUpperCase() === 'TON') return TON_NATIVE;
         if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
-        const results = await apiClient.queryAssets({ searchString: sym, limit: 10 });
-        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase() && a.dexUsdPrice && !a.blacklisted)
-                   || results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase())
-                   || results[0];
-        if (!match) throw new Error(`Token "${sym}" not found`);
-        return match.contractAddress;
+        const match = await findAssetBySymbol(sym);
+        if (!match) throw new Error(`Token "${sym}" not found on STON.fi`);
+        return match.contract_address;
       };
       const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
       const offerUnits = String(BigInt(Math.round(amount * 1e9)));
@@ -1065,9 +1079,8 @@ async function runSageTool(name, input) {
       const resolveAddr = async (sym) => {
         if (!sym || sym.toUpperCase() === 'TON') return 'ton';
         if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
-        const results = await apiClient.queryAssets({ searchString: sym, limit: 5 });
-        const match = results.find(a => a.symbol?.toUpperCase() === sym.toUpperCase()) || results[0];
-        return match?.contractAddress || sym;
+        const match = await findAssetBySymbol(sym);
+        return match?.contract_address || sym;
       };
       const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
 
