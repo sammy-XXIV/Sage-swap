@@ -1141,13 +1141,17 @@ async function handleWhatsAppUserInput(input, userJid) {
     return { text: `🔑 *Your seed phrase (write this down):*\n\n${mnemonic}\n\n⚠️ This will stop being accessible in ${Math.floor(24 - hoursElapsed)} hours. Never share these words.` };
   }
 
-  if (!conversationHistory.has(userJid)) conversationHistory.set(userJid, []);
+  // Load history from Supabase (persists across redeploys)
+  if (!conversationHistory.has(userJid)) {
+    const { data } = await supabase.from('conversation_history').select('messages').eq('jid', userJid).single();
+    conversationHistory.set(userJid, data?.messages || []);
+  }
   const history = conversationHistory.get(userJid);
 
   history.push({ role: 'user', content: input });
 
-  // Keep last 10 messages to avoid token bloat
-  if (history.length > 10) history.splice(0, history.length - 10);
+  // Keep last 20 messages to avoid token bloat
+  if (history.length > 20) history.splice(0, history.length - 20);
 
   try {
     const systemWithWallet = `${SAGE_SYSTEM_PROMPT}\n\nUser context:\n- Wallet address: ${walletRecord.agent_address}\n- userJid: ${userJid} (use this when tools require userJid)`;
@@ -1187,6 +1191,14 @@ async function handleWhatsAppUserInput(input, userJid) {
     const reply = textBlock?.text || "I couldn't process that. Try again.";
 
     history.push({ role: 'assistant', content: reply });
+
+    // Persist to Supabase (fire and forget)
+    supabase.from('conversation_history').upsert({
+      jid: userJid,
+      messages: history,
+      updated_at: new Date().toISOString(),
+    }).then(() => {}).catch(() => {});
+
     return { text: reply };
   } catch (e) {
     console.error('Claude error:', e.message, e.status, JSON.stringify(e.error || ''));
