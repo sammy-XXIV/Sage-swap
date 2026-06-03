@@ -1198,7 +1198,16 @@ async function handleWhatsAppUserInput(input, userJid) {
     return { text: reply };
   } catch (e) {
     console.error('Claude error:', e.message, e.status, JSON.stringify(e.error || ''));
-    return { text: `❌ Error: ${e.message || 'Something went wrong. Try again.'}` };
+    if (e.status === 401 || e.message?.toLowerCase().includes('authentication') || e.message?.toLowerCase().includes('api key')) {
+      return { text: `Something went wrong on my end. Try again in a moment.` };
+    }
+    if (e.status === 429) {
+      return { text: `I'm a bit overloaded right now. Give it a few seconds and try again.` };
+    }
+    if (e.status >= 500) {
+      return { text: `Service is having issues. Try again shortly.` };
+    }
+    return { text: `Something went wrong. Try again.` };
   }
 }
 
