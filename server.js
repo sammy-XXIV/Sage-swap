@@ -1478,6 +1478,13 @@ async function startWhatsApp() {
               supabase.from('pending_polls').delete().eq('jid', jid).then(() => {}).catch(() => {});
               const input = pollInfo.optionMap?.[selectedOption] || selectedOption;
               console.log(`🗳️ ${jid} voted: "${selectedOption}" → "${input}"`);
+
+              // Fast-path: cancel doesn't need Claude
+              if (input === 'cancel') {
+                await sock.sendMessage(jid, { text: `Cancelled. Let me know if you'd like to try something else.` });
+                continue;
+              }
+
               const response = await handleWhatsAppUserInput(input, jid);
               await sendResponse(sock, jid, response);
             }
