@@ -1624,29 +1624,34 @@ async function startWhatsApp() {
   });
 
   async function sendResponse(sock, jid, response) {
-    const sent = await sock.sendMessage(jid, { text: response.text });
+    // Always use the live global socket — the local `sock` ref can go stale on reconnect
+    const s = waSocket || sock;
+    if (!s) return;
+    let sent;
+    try { sent = await s.sendMessage(jid, { text: response.text }); }
+    catch (e) { console.error('sendResponse text error:', e.message); return; }
 
     // Send chart image if queued
     if (pendingImages.has(jid)) {
       const { buffer, caption } = pendingImages.get(jid);
       pendingImages.delete(jid);
-      await sock.sendMessage(jid, { image: buffer, caption });
+      try { await s.sendMessage(jid, { image: buffer, caption }); } catch {}
     }
 
     // Pin wallet address messages
     if (response.pin && sent?.key) {
-      try { await sock.pinMessage(jid, sent.key, 1); } catch {}
+      try { await s.pinMessage(jid, sent.key, 1); } catch {}
     }
 
     // Send poll if response includes one (e.g. onboarding)
     if (response.poll) {
-      await sendPoll(sock, jid, response.poll.question, response.poll.options, response.poll.optionMap);
+      await sendPoll(s, jid, response.poll.question, response.poll.options, response.poll.optionMap);
       return;
     }
 
     // Auto-send confirm poll whenever Claude asks "Confirm?"
     if (/confirm\?/i.test(response.text)) {
-      await sendPoll(sock, jid,
+      await sendPoll(s, jid,
         'Proceed?',
         ['✅ Confirm', '❌ Cancel'],
         { '✅ Confirm': 'yes, confirmed', '❌ Cancel': 'cancel' }
@@ -1757,7 +1762,8 @@ async function startWhatsApp() {
         await sendResponse(sock, jid, response);
       } catch (e) {
         console.error('Handler error:', e.message);
-        await sock.sendMessage(jid, { text: '❌ Something went wrong. Try again.' });
+        if (e.message?.includes('Connection Closed') || e.message?.includes('Connection Terminated')) return;
+        try { await (waSocket || sock).sendMessage(jid, { text: '❌ Something went wrong. Try again.' }); } catch {}
       }
     }
   });
