@@ -1290,10 +1290,21 @@ async function runSageTool(name, input) {
 
       return JSON.stringify({ success: true, swapped: amount, from: fromToken, to: toToken, expected_out: toAmount.toFixed(6) });
     } catch (e) {
-      if (waSocket && userJid && progressKey) {
-        await waSocket.sendMessage(userJid, { text: `❌ *Swap failed*\n${e.message}`, edit: progressKey }).catch(() => {});
+      const msg = e.message || '';
+      let friendly = msg;
+      if (msg.includes('No liquidity') || msg.includes('No quote') || msg.includes('noQuote')) {
+        friendly = `Amount too small or no liquidity for this pair on STON.fi. Try a larger amount (minimum is usually ~$1–2 worth).`;
+      } else if (msg.includes('Insufficient') || msg.includes('insufficient')) {
+        friendly = `Insufficient balance to complete this swap.`;
+      } else if (msg.includes('timeout') || msg.includes('Timeout')) {
+        friendly = `STON.fi took too long to respond. Try again in a moment.`;
+      } else if (msg.includes('exit_code') || msg.includes('exitCode')) {
+        friendly = `Transaction rejected by the network. Your wallet may need more TON for gas.`;
       }
-      return `Swap failed: ${e.message}`;
+      if (waSocket && userJid && progressKey) {
+        await waSocket.sendMessage(userJid, { text: `❌ *Swap failed*\n${friendly}`, edit: progressKey }).catch(() => {});
+      }
+      return `Swap failed: ${friendly}`;
     }
   }
 
