@@ -1409,6 +1409,13 @@ async function startWhatsApp() {
       const encKey = pollSent?.message?.pollCreationMessage?.encKey;
       if (encKey) {
         pendingPolls.set(jid, { msgKey: pollSent.key, encKey, options, optionMap });
+        supabase.from('pending_polls').upsert({
+          jid,
+          msg_key: pollSent.key,
+          enc_key: Buffer.from(encKey).toString('base64'),
+          options: JSON.stringify(options),
+          option_map: JSON.stringify(optionMap),
+        }).then(() => {}).catch(e => console.error('Save poll error:', e.message));
       }
     } catch (e) {
       console.error('Send poll error:', e.message);
@@ -1424,8 +1431,35 @@ async function startWhatsApp() {
 
       // ── Poll vote handler ──────────────────────────────────
       if (msg.message?.pollUpdateMessage) {
-        const pollInfo = pendingPolls.get(jid);
-        if (!pollInfo) continue;
+        let pollInfo = pendingPolls.get(jid);
+
+        // Recover from Supabase if not in memory (happens after reconnect/redeploy)
+        if (!pollInfo) {
+          try {
+            const { data } = await supabase.from('pending_polls').select('*').eq('jid', jid).single();
+            if (data) {
+              pollInfo = {
+                msgKey: data.msg_key,
+                encKey: Buffer.from(data.enc_key, 'base64'),
+                options: typeof data.options === 'string' ? JSON.parse(data.options) : data.options,
+                optionMap: typeof data.option_map === 'string' ? JSON.parse(data.option_map) : data.option_map,
+              };
+              pendingPolls.set(jid, pollInfo);
+            }
+          } catch {}
+        }
+
+        if (!pollInfo) {
+          // Poll state lost entirely — send a plain-text fallback
+          try {
+            const walletRecord = await getWhatsAppWallet(jid);
+            if (!walletRecord) {
+              await sock.sendMessage(jid, { text: `Please reply with *generate* to create a new wallet or *import* to import an existing one.` });
+            }
+          } catch {}
+          continue;
+        }
+
         try {
           const decrypted = decryptPollVote(msg.message.pollUpdateMessage.vote, {
             pollCreatorJid: sock.user.id,
@@ -1440,6 +1474,7 @@ async function startWhatsApp() {
             });
             if (selectedOption) {
               pendingPolls.delete(jid);
+              supabase.from('pending_polls').delete().eq('jid', jid).then(() => {}).catch(() => {});
               const input = pollInfo.optionMap?.[selectedOption] || selectedOption;
               console.log(`🗳️ ${jid} voted: "${selectedOption}" → "${input}"`);
               const response = await handleWhatsAppUserInput(input, jid);
@@ -1492,6 +1527,21 @@ app.post('/reconnect', async (req, res) => {
   restartTimer = setTimeout(() => startWhatsApp().catch(console.error), 1000);
   res.json({ ok: true, message: 'Reconnecting...' });
 });
+
+// Pre-load pending polls from Supabase into memory so they survive reconnects
+supabase.from('pending_polls').select('*').then(({ data }) => {
+  if (data?.length) {
+    for (const row of data) {
+      pendingPolls.set(row.jid, {
+        msgKey: row.msg_key,
+        encKey: Buffer.from(row.enc_key, 'base64'),
+        options: typeof row.options === 'string' ? JSON.parse(row.options) : row.options,
+        optionMap: typeof row.option_map === 'string' ? JSON.parse(row.option_map) : row.option_map,
+      });
+    }
+    console.log(`📋 Loaded ${data.length} pending poll(s) from Supabase`);
+  }
+}).catch(() => {});
 
 // Delay startup to let previous instance release lock first
 setTimeout(() => startWhatsApp().catch(console.error), 8000);
