@@ -112,7 +112,7 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type =
   <rect x="20" y="338" width="580" height="1" fill="#0A1828"/>
 
   <!-- Footer -->
-  <text x="310" y="358" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">POWERED BY SAGE · BUILT ON STON.fi</text>
+  <text x="310" y="358" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">SAGE · BUILT ON STON.fi</text>
 </svg>`;
 
   return sharp(Buffer.from(svg)).png().toBuffer();
