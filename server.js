@@ -1318,8 +1318,17 @@ async function handleWhatsAppUserInput(input, userJid) {
 
   history.push({ role: 'user', content: input });
 
-  // Keep last 20 messages to avoid token bloat
-  if (history.length > 20) history.splice(0, history.length - 20);
+  // Keep last 20 messages — but never orphan a tool_use/tool_result pair
+  if (history.length > 20) {
+    history.splice(0, history.length - 20);
+    // If first message is a tool_result (orphaned), drop it too
+    while (history.length > 0) {
+      const first = history[0];
+      const isToolResult = Array.isArray(first.content) && first.content[0]?.type === 'tool_result';
+      if (first.role === 'user' && isToolResult) { history.shift(); }
+      else break;
+    }
+  }
 
   try {
     const systemWithWallet = `${SAGE_SYSTEM_PROMPT}\n\nUser context:\n- Wallet address: ${walletRecord.agent_address}\n- userJid: ${userJid} (use this when tools require userJid)`;
@@ -1370,8 +1379,14 @@ async function handleWhatsAppUserInput(input, userJid) {
     return { text: reply };
   } catch (e) {
     console.error('Claude error:', e.message, e.status, JSON.stringify(e.error || ''));
+    if (e.status === 400) {
+      // Malformed history — wipe it and let user retry cleanly
+      conversationHistory.set(userJid, []);
+      supabase.from('conversation_history').delete().eq('jid', userJid).then(() => {}).catch(() => {});
+      return { text: `Something went wrong with my memory. I've reset our chat — please repeat your last request.` };
+    }
     if (e.status === 401 || e.message?.toLowerCase().includes('authentication') || e.message?.toLowerCase().includes('api key')) {
-      return { text: `Something went wrong on my end. Try again in a moment.` };
+      return { text: `Authentication error. Contact support.` };
     }
     if (e.status === 429) {
       return { text: `I'm a bit overloaded right now. Give it a few seconds and try again.` };
