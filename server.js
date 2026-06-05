@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import sharp from 'sharp';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, decryptPollVote } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
@@ -19,6 +20,103 @@ const apiClient = new StonApiClient();
 const tonClient = new Client({ endpoint: 'https://toncenter.com/api/v2/jsonRPC' });
 const supabase = createClient(process.env.SUPABASE_URL||'', process.env.SUPABASE_KEY||'');
 const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
+
+// ── Transaction Card Generator ────────────────────────────────────────────────
+function fmtAmount(n) {
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + 'B';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
+  return Number(n).toFixed(n < 0.01 ? 6 : 4).replace(/\.?0+$/, '');
+}
+
+async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type = 'SWAP' }) {
+  const from = `${fmtAmount(fromAmount)} ${(fromToken || '').replace(/^\$/, '').toUpperCase()}`;
+  const to   = `${fmtAmount(toAmount)}   ${(toToken   || '').replace(/^\$/, '').toUpperCase()}`;
+  const time = new Date().toUTCString().replace(' GMT', ' UTC');
+  const rate = fromAmount > 0 ? `1 ${(fromToken||'').replace(/^\$/,'').toUpperCase()} = ${fmtAmount(toAmount/fromAmount)} ${(toToken||'').replace(/^\$/,'').toUpperCase()}` : '';
+
+  // Escape XML special chars
+  const x = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const svg = `<svg width="620" height="370" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#060D1F"/>
+      <stop offset="100%" stop-color="#0C1A35"/>
+    </linearGradient>
+    <linearGradient id="blueBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00C2FF"/>
+      <stop offset="100%" stop-color="#0055FF"/>
+    </linearGradient>
+    <linearGradient id="glowLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00C2FF" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#00C2FF" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#00C2FF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Card background -->
+  <rect width="620" height="370" rx="18" fill="url(#bgGrad)"/>
+
+  <!-- Top accent bar -->
+  <rect width="620" height="5" rx="3" fill="url(#blueBar)"/>
+
+  <!-- Left accent stripe -->
+  <rect x="0" y="5" width="4" height="360" rx="2" fill="url(#blueBar)"/>
+
+  <!-- SAGE branding -->
+  <text x="34" y="46" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="bold" fill="#00C2FF">SAGE</text>
+  <text x="34" y="64" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="11" fill="#1E3A60" letter-spacing="2">TON DeFi AGENT</text>
+  <text x="600" y="50" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#1A3050" text-anchor="end">${x(type)}</text>
+
+  <!-- Glowing separator -->
+  <rect x="20" y="76" width="580" height="1" fill="url(#glowLine)"/>
+
+  <!-- Checkmark circle -->
+  <circle cx="310" cy="118" r="24" fill="none" stroke="#00E676" stroke-width="2.5"/>
+  <path d="M298 118 L307 127 L323 109" fill="none" stroke="#00E676" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- APPROVED label -->
+  <text x="310" y="158" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#00E676" text-anchor="middle" letter-spacing="3">TRANSACTION APPROVED</text>
+
+  <!-- Separator -->
+  <rect x="20" y="172" width="580" height="1" fill="#0F2040"/>
+
+  <!-- FROM label -->
+  <text x="155" y="200" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#2A5070" text-anchor="middle" letter-spacing="2">FROM</text>
+  <!-- TO label -->
+  <text x="465" y="200" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#2A5070" text-anchor="middle" letter-spacing="2">TO</text>
+
+  <!-- Arrow -->
+  <line x1="258" y1="212" x2="355" y2="212" stroke="#00C2FF" stroke-width="1.5"/>
+  <path d="M348 206 L356 212 L348 218" fill="none" stroke="#00C2FF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Amounts -->
+  <text x="155" y="224" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${x(from)}</text>
+  <text x="465" y="224" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${x(to)}</text>
+
+  <!-- Separator -->
+  <rect x="20" y="244" width="580" height="1" fill="#0F2040"/>
+
+  <!-- Detail rows -->
+  <text x="34" y="270" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#2A5070">Rate</text>
+  <text x="590" y="270" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">${x(rate)}</text>
+
+  <text x="34" y="295" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#2A5070">Network</text>
+  <text x="590" y="295" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">TON Blockchain</text>
+
+  <text x="34" y="320" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#2A5070">Time</text>
+  <text x="590" y="320" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">${x(time)}</text>
+
+  <!-- Bottom separator -->
+  <rect x="20" y="338" width="580" height="1" fill="#0A1828"/>
+
+  <!-- Footer -->
+  <text x="310" y="358" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">POWERED BY SAGE · AUTONOMOUS DEFI ON TON</text>
+</svg>`;
+
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
 
 // Asset cache — STON.fi search API is broken, so we cache top assets and filter client-side
 let assetCache = null;
@@ -1000,6 +1098,51 @@ async function runSageTool(name, input) {
     }
   }
 
+  if (name === 'execute_swap') {
+    try {
+      const { fromToken, toToken, amount, userJid } = input;
+      const walletData = await getWhatsAppWallet(userJid);
+      if (!walletData) return 'No wallet found for this user.';
+      const mnemonic = decrypt(walletData.encrypted_mnemonic).split(' ');
+      const keyPair = await mnemonicToPrivateKey(mnemonic);
+      const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+      const contract = tonClient.open(wallet);
+      const resolveAddr = async (rawSym) => {
+        const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
+        if (sym.toUpperCase() === 'TON') return TON_NATIVE;
+        if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
+        const match = await findAssetBySymbol(sym);
+        if (!match) throw new Error(`Token "${sym}" not found on STON.fi`);
+        return match.contract_address;
+      };
+      const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
+      const offerUnits = String(BigInt(Math.round(amount * 1e9)));
+      const sim = await apiClient.simulateSwap({ offerAddress: fromAddr, askAddress: toAddr, offerUnits, slippageTolerance: '0.01' });
+      if (!sim.askUnits) throw new Error('No liquidity for this pair');
+      const router = tonClient.open(new DEX.v1.Router());
+      const proxyTon = new pTON.v1();
+      const isTon = fromAddr === TON_NATIVE;
+      const isTonAsk = toAddr === TON_NATIVE;
+      let txParams;
+      if (isTon) txParams = await router.getSwapTonToJettonTxParams({ userWalletAddress: wallet.address.toString(), proxyTon, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
+      else if (isTonAsk) txParams = await router.getSwapJettonToTonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), proxyTon, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
+      else txParams = await router.getSwapJettonToJettonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
+      const seqno = await contract.getSeqno();
+      await contract.sendTransfer({ seqno, secretKey: keyPair.secretKey, messages: [internal({ to: txParams.to, value: txParams.value, body: txParams.body })] });
+      const toAmount = Number(sim.askUnits) / 1e9;
+
+      // Send transaction card image
+      try {
+        const cardBuf = await generateTxCard({ fromAmount: amount, fromToken, toAmount, toToken });
+        if (waSocket && userJid) {
+          await waSocket.sendMessage(userJid, { image: cardBuf, caption: '' });
+        }
+      } catch (imgErr) { console.error('Tx card error:', imgErr.message); }
+
+      return JSON.stringify({ success: true, swapped: amount, from: fromToken, to: toToken, expected_out: toAmount.toFixed(6) });
+    } catch (e) { return `Swap failed: ${e.message}`; }
+  }
+
   if (name === 'get_swap_quote') {
     try {
       const { fromToken, toToken, amount } = input;
@@ -1032,41 +1175,6 @@ async function runSageTool(name, input) {
     } catch (e) {
       return `Error getting swap quote: ${e.message}`;
     }
-  }
-
-  if (name === 'execute_swap') {
-    try {
-      const { fromToken, toToken, amount, userJid } = input;
-      const walletData = await getWhatsAppWallet(userJid);
-      if (!walletData) return 'No wallet found for this user.';
-      const mnemonic = decrypt(walletData.encrypted_mnemonic).split(' ');
-      const keyPair = await mnemonicToPrivateKey(mnemonic);
-      const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
-      const contract = tonClient.open(wallet);
-      const resolveAddr = async (rawSym) => {
-        const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
-        if (sym.toUpperCase() === 'TON') return TON_NATIVE;
-        if (/^[EUkf][Q_A-Za-z0-9\-]{46,48}$/.test(sym)) return sym;
-        const match = await findAssetBySymbol(sym);
-        if (!match) throw new Error(`Token "${sym}" not found on STON.fi`);
-        return match.contract_address;
-      };
-      const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
-      const offerUnits = String(BigInt(Math.round(amount * 1e9)));
-      const sim = await apiClient.simulateSwap({ offerAddress: fromAddr, askAddress: toAddr, offerUnits, slippageTolerance: '0.01' });
-      if (!sim.askUnits) throw new Error('No liquidity for this pair');
-      const router = tonClient.open(new DEX.v1.Router());
-      const proxyTon = new pTON.v1();
-      const isTon = fromAddr === TON_NATIVE;
-      const isTonAsk = toAddr === TON_NATIVE;
-      let txParams;
-      if (isTon) txParams = await router.getSwapTonToJettonTxParams({ userWalletAddress: wallet.address.toString(), proxyTon, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
-      else if (isTonAsk) txParams = await router.getSwapJettonToTonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), proxyTon, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
-      else txParams = await router.getSwapJettonToJettonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
-      const seqno = await contract.getSeqno();
-      await contract.sendTransfer({ seqno, secretKey: keyPair.secretKey, messages: [internal({ to: txParams.to, value: txParams.value, body: txParams.body })] });
-      return JSON.stringify({ success: true, swapped: amount, from: fromToken, to: toToken, expected_out: (Number(sim.askUnits) / 1e9).toFixed(6) });
-    } catch (e) { return `Swap failed: ${e.message}`; }
   }
 
   if (name === 'place_limit_order') {
