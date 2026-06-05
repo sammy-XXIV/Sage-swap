@@ -3,7 +3,7 @@ import cors from 'cors';
 import crypto from 'crypto';
 import { renderAsync } from '@resvg/resvg-js';
 import { readFileSync } from 'fs';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, decryptPollVote } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
 import Anthropic from '@anthropic-ai/sdk';
@@ -594,7 +594,6 @@ let reconnect440Count = 0;
 const INSTANCE_ID = Math.random().toString(36).substr(2, 9);
 const userSessions = new Map();
 const pendingImages = new Map(); // jid -> { buffer, caption }
-const pendingPolls = new Map();  // jid -> { msgKey, encKey, options, optionMap }
 
 async function acquireLock() {
   const now = new Date();
@@ -790,12 +789,7 @@ async function handleOnboarding(trimmed, lower, userJid) {
   // Default welcome for new users
   userSessions.set(userJid, { step: 'onboarding' });
   return {
-    text: `👋 Welcome to *SAGE*!\n\nYour autonomous DeFi agent on STON.fi. To get started, set up your wallet:`,
-    poll: {
-      question: 'How would you like to set up your wallet?',
-      options: ['🆕 Generate new wallet', '📥 Import existing wallet'],
-      optionMap: { '🆕 Generate new wallet': 'generate', '📥 Import existing wallet': 'import' },
-    },
+    text: `👋 Welcome to *SAGE*!\n\nYour autonomous DeFi agent on STON.fi. To get started, set up your wallet:\n\nReply *generate* to create a new wallet\nReply *import* to import an existing one`,
   };
 }
 const conversationHistory = new Map(); // per-user message history
@@ -1652,33 +1646,6 @@ async function startWhatsApp() {
       try { await s.pinMessage(jid, sent.key, 1); } catch {}
     }
 
-    // Send poll if response includes one (e.g. onboarding)
-    if (response.poll) {
-      await sendPoll(s, jid, response.poll.question, response.poll.options, response.poll.optionMap);
-      return;
-    }
-
-  }
-
-  async function sendPoll(sock, jid, question, options, optionMap) {
-    try {
-      const pollSent = await sock.sendMessage(jid, {
-        poll: { name: question, values: options, selectableCount: 1 },
-      });
-      const encKey = pollSent?.message?.pollCreationMessage?.encKey;
-      if (encKey) {
-        pendingPolls.set(jid, { msgKey: pollSent.key, encKey, options, optionMap });
-        supabase.from('pending_polls').upsert({
-          jid,
-          msg_key: pollSent.key,
-          enc_key: Buffer.from(encKey).toString('base64'),
-          options: JSON.stringify(options),
-          option_map: JSON.stringify(optionMap),
-        }).then(() => {}).catch(e => console.error('Save poll error:', e.message));
-      }
-    } catch (e) {
-      console.error('Send poll error:', e.message);
-    }
   }
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -1688,71 +1655,6 @@ async function startWhatsApp() {
       const jid = msg.key.remoteJid;
       if (!jid) continue;
 
-      // ── Poll vote handler ──────────────────────────────────
-      if (msg.message?.pollUpdateMessage) {
-        let pollInfo = pendingPolls.get(jid);
-
-        // Recover from Supabase if not in memory (happens after reconnect/redeploy)
-        if (!pollInfo) {
-          try {
-            const { data } = await supabase.from('pending_polls').select('*').eq('jid', jid).single();
-            if (data) {
-              pollInfo = {
-                msgKey: data.msg_key,
-                encKey: Buffer.from(data.enc_key, 'base64'),
-                options: typeof data.options === 'string' ? JSON.parse(data.options) : data.options,
-                optionMap: typeof data.option_map === 'string' ? JSON.parse(data.option_map) : data.option_map,
-              };
-              pendingPolls.set(jid, pollInfo);
-            }
-          } catch {}
-        }
-
-        if (!pollInfo) {
-          // Poll state lost entirely — send a plain-text fallback
-          try {
-            const walletRecord = await getWhatsAppWallet(jid);
-            if (!walletRecord) {
-              await sock.sendMessage(jid, { text: `Please reply with *generate* to create a new wallet or *import* to import an existing one.` });
-            }
-          } catch {}
-          continue;
-        }
-
-        try {
-          const decrypted = decryptPollVote(msg.message.pollUpdateMessage.vote, {
-            pollCreatorJid: sock.user.id,
-            pollMsgId: pollInfo.msgKey.id,
-            pollEncKey: pollInfo.encKey,
-            voterJid: jid,
-          });
-          if (decrypted.selectedOptions?.length > 0) {
-            const selectedOption = pollInfo.options.find(opt => {
-              const hash = crypto.createHash('sha256').update(opt).digest();
-              return decrypted.selectedOptions.some(h => Buffer.from(h).equals(hash));
-            });
-            console.log(`🗳️ Poll vote — options: ${JSON.stringify(pollInfo.options)}, matched: ${selectedOption || 'NONE'}, selectedHashes: ${decrypted.selectedOptions?.length}`);
-            if (selectedOption) {
-              pendingPolls.delete(jid);
-              supabase.from('pending_polls').delete().eq('jid', jid).then(() => {}).catch(() => {});
-              const input = pollInfo.optionMap?.[selectedOption] || selectedOption;
-              console.log(`🗳️ ${jid} voted: "${selectedOption}" → "${input}"`);
-
-              // Fast-path: cancel doesn't need Claude
-              if (input === 'cancel') {
-                await sock.sendMessage(jid, { text: `Cancelled. Let me know if you'd like to try something else.` });
-                continue;
-              }
-
-              const response = await handleWhatsAppUserInput(input, jid);
-              await sendResponse(sock, jid, response);
-            }
-          }
-        } catch (e) {
-          console.error('Poll decrypt error:', e.message);
-        }
-        continue;
-      }
 
       // ── Regular text message ───────────────────────────────
       const text = msg.message?.conversation ||
