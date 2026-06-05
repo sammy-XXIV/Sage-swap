@@ -1641,19 +1641,6 @@ async function gracefulShutdown() {
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
 
-// Test card endpoint
-app.post('/test-card', async (req, res) => {
-  const secret = req.headers['x-secret'] || req.query.secret;
-  if (secret !== (process.env.QR_SECRET || '')) return res.status(401).json({ ok: false });
-  if (!waSocket || !waConnected) return res.status(503).json({ ok: false, error: 'WA not connected' });
-  const jid = '2347042759593@s.whatsapp.net';
-  try {
-    const cardBuf = await generateTxCard({ fromAmount: 0.6689, fromToken: 'TON', toAmount: 2713.65, toToken: 'NOT' });
-    await waSocket.sendMessage(jid, { image: cardBuf, caption: '' });
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
 // Reconnect endpoint — restores session from Supabase without QR
 app.post('/reconnect', async (req, res) => {
   const secret = req.headers['x-secret'] || req.query.secret;
