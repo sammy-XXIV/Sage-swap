@@ -1658,14 +1658,6 @@ async function startWhatsApp() {
       return;
     }
 
-    // Auto-send confirm poll whenever Claude asks "Confirm?"
-    if (/confirm\?/i.test(response.text)) {
-      await sendPoll(s, jid,
-        'Proceed?',
-        ['✅ Confirm', '❌ Cancel'],
-        { '✅ Confirm': 'yes, confirmed', '❌ Cancel': 'cancel' }
-      );
-    }
   }
 
   async function sendPoll(sock, jid, question, options, optionMap) {
