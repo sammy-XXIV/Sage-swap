@@ -420,7 +420,31 @@ setInterval(checkLimitOrders, 30000);
 console.log('🤖 Limit order monitor running');
 
 const PORT = process.env.PORT||3000;
-app.listen(PORT, () => console.log(`SAGE Swap on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`SAGE Swap on port ${PORT}`);
+  // Railway marks the instance healthy once this callback fires.
+  // Wait 20s AFTER the health check passes before connecting WhatsApp —
+  // by then Railway has sent SIGTERM to the old instance and it has
+  // disconnected cleanly (our SIGTERM handler takes ~5s).
+  setTimeout(() => {
+    supabase.from('pending_polls').select('*').then(({ data }) => {
+      if (data?.length) {
+        for (const row of data) {
+          pendingPolls.set(row.jid, {
+            msgKey: row.msg_key,
+            encKey: Buffer.from(row.enc_key, 'base64'),
+            options: typeof row.options === 'string' ? JSON.parse(row.options) : row.options,
+            optionMap: typeof row.option_map === 'string' ? JSON.parse(row.option_map) : row.option_map,
+          });
+        }
+        console.log(`📋 Loaded ${data.length} pending poll(s) from Supabase`);
+      }
+    }).catch(() => {});
+
+    startWhatsApp().catch(console.error);
+  }, 20000);
+  console.log('⏳ Waiting 20s after health check before connecting WhatsApp...');
+});
 
 
 // ── WHATSAPP (Baileys) ────────────────────────────────────
@@ -1545,22 +1569,4 @@ app.post('/reconnect', async (req, res) => {
   res.json({ ok: true, message: 'Reconnecting...' });
 });
 
-// Pre-load pending polls from Supabase into memory so they survive reconnects
-supabase.from('pending_polls').select('*').then(({ data }) => {
-  if (data?.length) {
-    for (const row of data) {
-      pendingPolls.set(row.jid, {
-        msgKey: row.msg_key,
-        encKey: Buffer.from(row.enc_key, 'base64'),
-        options: typeof row.options === 'string' ? JSON.parse(row.options) : row.options,
-        optionMap: typeof row.option_map === 'string' ? JSON.parse(row.option_map) : row.option_map,
-      });
-    }
-    console.log(`📋 Loaded ${data.length} pending poll(s) from Supabase`);
-  }
-}).catch(() => {});
-
-// Delay startup to let previous instance disconnect WhatsApp and release lock
-setTimeout(() => startWhatsApp().catch(console.error), 15000);
-console.log('⏳ Waiting 15s for previous instance to shut down...');
 
