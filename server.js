@@ -66,7 +66,7 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type =
 
   <!-- SAGE branding -->
   <text x="34" y="46" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="bold" fill="#00C2FF">SAGE</text>
-  <text x="34" y="64" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="11" fill="#1E3A60" letter-spacing="2">TON DeFi AGENT</text>
+  <text x="34" y="64" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="11" fill="#1E3A60" letter-spacing="2">STON.fi AGENT</text>
   <text x="600" y="50" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#1A3050" text-anchor="end">${x(type)}</text>
 
   <!-- Glowing separator -->
@@ -103,7 +103,7 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type =
   <text x="590" y="270" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">${x(rate)}</text>
 
   <text x="34" y="295" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#2A5070">Network</text>
-  <text x="590" y="295" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">TON Blockchain</text>
+  <text x="590" y="295" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">STON.fi</text>
 
   <text x="34" y="320" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#2A5070">Time</text>
   <text x="590" y="320" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">${x(time)}</text>
@@ -112,7 +112,7 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type =
   <rect x="20" y="338" width="580" height="1" fill="#0A1828"/>
 
   <!-- Footer -->
-  <text x="310" y="358" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">POWERED BY SAGE · AUTONOMOUS DEFI ON TON</text>
+  <text x="310" y="358" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">POWERED BY SAGE · BUILT ON STON.fi</text>
 </svg>`;
 
   return sharp(Buffer.from(svg)).png().toBuffer();
@@ -739,7 +739,7 @@ async function handleOnboarding(trimmed, lower, userJid) {
   // Default welcome for new users
   userSessions.set(userJid, { step: 'onboarding' });
   return {
-    text: `👋 Welcome to *SAGE*!\n\nYour autonomous DeFi agent on TON. To get started, set up your wallet:`,
+    text: `👋 Welcome to *SAGE*!\n\nYour autonomous DeFi agent on STON.fi. To get started, set up your wallet:`,
     poll: {
       question: 'How would you like to set up your wallet?',
       options: ['🆕 Generate new wallet', '📥 Import existing wallet'],
@@ -749,7 +749,7 @@ async function handleOnboarding(trimmed, lower, userJid) {
 }
 const conversationHistory = new Map(); // per-user message history
 
-const SAGE_SYSTEM_PROMPT = `You are SAGE, an autonomous DeFi AI agent on WhatsApp for the TON blockchain. You execute trades, swaps, staking, and limit orders on behalf of the user using their SAGE wallet.
+const SAGE_SYSTEM_PROMPT = `You are SAGE, an autonomous DeFi AI agent on WhatsApp powered by STON.fi. You execute trades, swaps, staking, and limit orders on behalf of the user using their SAGE wallet.
 
 Tools available:
 - get_wallet_balance: check TON and token balances
