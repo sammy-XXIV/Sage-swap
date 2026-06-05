@@ -954,32 +954,46 @@ async function runSageTool(name, input) {
       const { tokenAddress, symbol, timeframe = '1d', userJid } = input;
 
       const tfMap = {
-        '1h': { interval: 'hour', limit: 24 },
-        '4h': { interval: 'hour', limit: 96 },
-        '1d': { interval: 'day', limit: 30 },
-        '1w': { interval: 'day', limit: 7 },
-        '1m': { interval: 'day', limit: 30 },
+        '1h': { interval: 'hour', aggregate: 1,  limit: 24  },
+        '4h': { interval: 'hour', aggregate: 4,  limit: 42  },
+        '1d': { interval: 'day',  aggregate: 1,  limit: 30  },
+        '1w': { interval: 'day',  aggregate: 1,  limit: 14  },
+        '1m': { interval: 'day',  aggregate: 1,  limit: 30  },
       };
-      const { interval, limit } = tfMap[timeframe] || tfMap['1d'];
+      const { interval, aggregate, limit } = tfMap[timeframe] || tfMap['1d'];
 
-      // Get pool directly from GeckoTerminal (avoids address format mismatch with STON.fi)
+      // Try token-pools lookup, fall back to search API if 404 (GeckoTerminal address format mismatch)
+      let poolAddress, isBase = true;
       const tokenPoolsRes = await fetch(
         `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${tokenAddress}/pools?page=1`,
         { headers: { 'Accept': 'application/json' } }
       );
       const tokenPoolsData = await tokenPoolsRes.json();
-      const topPool = tokenPoolsData?.data?.[0];
-      if (!topPool) return `No trading pool found for ${symbol} on GeckoTerminal.`;
+      let topPool = tokenPoolsData?.data?.[0];
 
-      const poolAddress = topPool.attributes?.address;
-      const baseTokenId = topPool.relationships?.base_token?.data?.id || '';
-      // base_token id format: "ton_0:rawaddress" — check if our token is base or quote
-      const normalizedAddr = tokenAddress.replace(/^0:/, '').toLowerCase();
-      const isBase = baseTokenId.toLowerCase().includes(normalizedAddr);
+      if (!topPool) {
+        // Fall back to search by symbol
+        const searchRes = await fetch(
+          `https://api.geckoterminal.com/api/v2/search/pools?query=${encodeURIComponent(symbol + ' TON')}&network=ton&page=1`,
+          { headers: { 'Accept': 'application/json' } }
+        );
+        const searchData = await searchRes.json();
+        topPool = searchData?.data?.[0];
+        if (!topPool) return `No trading pool found for ${symbol} on GeckoTerminal.`;
+        poolAddress = topPool.attributes?.address;
+        // In search results base token is always first in the pair name
+        const pairName = topPool.attributes?.name || '';
+        isBase = pairName.toUpperCase().startsWith(symbol.toUpperCase());
+      } else {
+        poolAddress = topPool.attributes?.address;
+        const baseTokenId = topPool.relationships?.base_token?.data?.id || '';
+        const normalizedAddr = tokenAddress.replace(/^0:/, '').toLowerCase();
+        isBase = baseTokenId.toLowerCase().includes(normalizedAddr);
+      }
 
       // Fetch OHLCV using GeckoTerminal's own pool address
       const geckoRes = await fetch(
-        `https://api.geckoterminal.com/api/v2/networks/ton/pools/${poolAddress}/ohlcv/${interval}?limit=${limit}`,
+        `https://api.geckoterminal.com/api/v2/networks/ton/pools/${poolAddress}/ohlcv/${interval}?aggregate=${aggregate}&limit=${limit}`,
         { headers: { 'Accept': 'application/json' } }
       );
       const geckoData = await geckoRes.json();
