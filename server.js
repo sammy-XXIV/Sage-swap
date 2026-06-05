@@ -1099,14 +1099,39 @@ async function runSageTool(name, input) {
   }
 
   if (name === 'execute_swap') {
+    const { fromToken, toToken, amount, userJid } = input;
+
+    // Live progress message — edit in place as swap progresses
+    let progressKey = null;
+    const steps = [
+      '⏳ *Preparing swap...*\n▓░░░░░░░░░ 10%',
+      '🔑 *Loading wallet...*\n▓▓▓░░░░░░░ 30%',
+      '📡 *Simulating swap...*\n▓▓▓▓▓░░░░░ 50%',
+      '✍️ *Signing transaction...*\n▓▓▓▓▓▓▓░░░ 70%',
+      '🚀 *Broadcasting to STON.fi...*\n▓▓▓▓▓▓▓▓▓░ 90%',
+    ];
+    const setProgress = async (step) => {
+      try {
+        if (!waSocket || !userJid) return;
+        if (!progressKey) {
+          const sent = await waSocket.sendMessage(userJid, { text: steps[step] });
+          progressKey = sent?.key;
+        } else {
+          await waSocket.sendMessage(userJid, { text: steps[step], edit: progressKey });
+        }
+      } catch {}
+    };
+
     try {
-      const { fromToken, toToken, amount, userJid } = input;
+      await setProgress(0);
       const walletData = await getWhatsAppWallet(userJid);
       if (!walletData) return 'No wallet found for this user.';
       const mnemonic = decrypt(walletData.encrypted_mnemonic).split(' ');
       const keyPair = await mnemonicToPrivateKey(mnemonic);
       const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
       const contract = tonClient.open(wallet);
+      await setProgress(1);
+
       const resolveAddr = async (rawSym) => {
         const sym = rawSym.startsWith('$') ? rawSym.slice(1) : rawSym;
         if (sym.toUpperCase() === 'TON') return TON_NATIVE;
@@ -1117,6 +1142,8 @@ async function runSageTool(name, input) {
       };
       const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
       const offerUnits = String(BigInt(Math.round(amount * 1e9)));
+      await setProgress(2);
+
       const sim = await apiClient.simulateSwap({ offerAddress: fromAddr, askAddress: toAddr, offerUnits, slippageTolerance: '0.01' });
       if (!sim.askUnits) throw new Error('No liquidity for this pair');
       const router = tonClient.open(new DEX.v1.Router());
@@ -1127,8 +1154,17 @@ async function runSageTool(name, input) {
       if (isTon) txParams = await router.getSwapTonToJettonTxParams({ userWalletAddress: wallet.address.toString(), proxyTon, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
       else if (isTonAsk) txParams = await router.getSwapJettonToTonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), proxyTon, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
       else txParams = await router.getSwapJettonToJettonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
+      await setProgress(3);
+
       const seqno = await contract.getSeqno();
+      await setProgress(4);
       await contract.sendTransfer({ seqno, secretKey: keyPair.secretKey, messages: [internal({ to: txParams.to, value: txParams.value, body: txParams.body })] });
+
+      // Final progress update
+      if (waSocket && userJid && progressKey) {
+        await waSocket.sendMessage(userJid, { text: '✅ *Swap submitted!*\n▓▓▓▓▓▓▓▓▓▓ 100%', edit: progressKey });
+      }
+
       const toAmount = Number(sim.askUnits) / 1e9;
 
       // Send transaction card image
@@ -1140,7 +1176,12 @@ async function runSageTool(name, input) {
       } catch (imgErr) { console.error('Tx card error:', imgErr.message); }
 
       return JSON.stringify({ success: true, swapped: amount, from: fromToken, to: toToken, expected_out: toAmount.toFixed(6) });
-    } catch (e) { return `Swap failed: ${e.message}`; }
+    } catch (e) {
+      if (waSocket && userJid && progressKey) {
+        await waSocket.sendMessage(userJid, { text: `❌ *Swap failed*\n${e.message}`, edit: progressKey }).catch(() => {});
+      }
+      return `Swap failed: ${e.message}`;
+    }
   }
 
   if (name === 'get_swap_quote') {
@@ -1385,8 +1426,8 @@ async function handleWhatsAppUserInput(input, userJid) {
       supabase.from('conversation_history').delete().eq('jid', userJid).then(() => {}).catch(() => {});
       return { text: `Something went wrong with my memory. I've reset our chat — please repeat your last request.` };
     }
-    if (e.status === 401 || e.message?.toLowerCase().includes('authentication') || e.message?.toLowerCase().includes('api key')) {
-      return { text: `Authentication error. Contact support.` };
+    if (e.status === 401) {
+      return { text: `API key error. Contact support.` };
     }
     if (e.status === 429) {
       return { text: `I'm a bit overloaded right now. Give it a few seconds and try again.` };
