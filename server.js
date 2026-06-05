@@ -1,8 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
-import { renderAsync } from '@resvg/resvg-js';
-import { readFileSync } from 'fs';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
@@ -21,7 +19,6 @@ app.use(express.json());
 
 const apiClient = new StonApiClient();
 const tonClient = new Client({ endpoint: process.env.TON_RPC_URL || 'https://toncenter.com/api/v2/jsonRPC', apiKey: process.env.TONCENTER_API_KEY || '' });
-const ROBOTO_FONT = readFileSync(new URL('./fonts/Roboto.ttf', import.meta.url));
 const supabase = createClient(process.env.SUPABASE_URL||'', process.env.SUPABASE_KEY||'');
 const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
 const omniston = new Omniston({ apiUrl: 'wss://omni-ws.ston.fi' });
@@ -64,94 +61,17 @@ function fmtAmount(n) {
   return Number(n).toFixed(n < 0.01 ? 6 : 4).replace(/\.?0+$/, '');
 }
 
-async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type = 'SWAP' }) {
+function generateTxReceipt({ fromAmount, fromToken, toAmount, toToken }) {
   const from = `${fmtAmount(fromAmount)} ${(fromToken || '').replace(/^\$/, '').toUpperCase()}`;
-  const to   = `${fmtAmount(toAmount)}   ${(toToken   || '').replace(/^\$/, '').toUpperCase()}`;
-  const time = new Date().toUTCString().replace(' GMT', ' UTC');
+  const to   = `${fmtAmount(toAmount)} ${(toToken || '').replace(/^\$/, '').toUpperCase()}`;
   const rate = fromAmount > 0 ? `1 ${(fromToken||'').replace(/^\$/,'').toUpperCase()} = ${fmtAmount(toAmount/fromAmount)} ${(toToken||'').replace(/^\$/,'').toUpperCase()}` : '';
-
-  // Escape XML special chars
-  const x = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-
-  const svg = `<svg width="620" height="370" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#060D1F"/>
-      <stop offset="100%" stop-color="#0C1A35"/>
-    </linearGradient>
-    <linearGradient id="blueBar" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#00C2FF"/>
-      <stop offset="100%" stop-color="#0055FF"/>
-    </linearGradient>
-    <linearGradient id="glowLine" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#00C2FF" stop-opacity="0"/>
-      <stop offset="50%" stop-color="#00C2FF" stop-opacity="0.6"/>
-      <stop offset="100%" stop-color="#00C2FF" stop-opacity="0"/>
-    </linearGradient>
-  </defs>
-
-  <!-- Card background -->
-  <rect width="620" height="370" rx="18" fill="url(#bgGrad)"/>
-
-  <!-- Top accent bar -->
-  <rect width="620" height="5" rx="3" fill="url(#blueBar)"/>
-
-  <!-- Left accent stripe -->
-  <rect x="0" y="5" width="4" height="360" rx="2" fill="url(#blueBar)"/>
-
-  <!-- SAGE branding -->
-  <text x="34" y="46" font-family="Roboto" font-size="22" font-weight="bold" fill="#00C2FF">SAGE</text>
-  <text x="34" y="64" font-family="Roboto" font-size="11" fill="#1E3A60" letter-spacing="2">STON.fi AGENT</text>
-  <text x="600" y="50" font-family="Roboto" font-size="12" fill="#1A3050" text-anchor="end">${x(type)}</text>
-
-  <!-- Glowing separator -->
-  <rect x="20" y="76" width="580" height="1" fill="url(#glowLine)"/>
-
-  <!-- Checkmark circle -->
-  <circle cx="310" cy="118" r="24" fill="none" stroke="#00E676" stroke-width="2.5"/>
-  <path d="M298 118 L307 127 L323 109" fill="none" stroke="#00E676" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
-
-  <!-- APPROVED label -->
-  <text x="310" y="158" font-family="Roboto" font-size="13" font-weight="bold" fill="#00E676" text-anchor="middle" letter-spacing="3">TRANSACTION APPROVED</text>
-
-  <!-- Separator -->
-  <rect x="20" y="172" width="580" height="1" fill="#0F2040"/>
-
-  <!-- FROM label -->
-  <text x="155" y="200" font-family="Roboto" font-size="10" fill="#2A5070" text-anchor="middle" letter-spacing="2">FROM</text>
-  <!-- TO label -->
-  <text x="465" y="200" font-family="Roboto" font-size="10" fill="#2A5070" text-anchor="middle" letter-spacing="2">TO</text>
-
-  <!-- Arrow -->
-  <line x1="258" y1="212" x2="355" y2="212" stroke="#00C2FF" stroke-width="1.5"/>
-  <path d="M348 206 L356 212 L348 218" fill="none" stroke="#00C2FF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-
-  <!-- Amounts -->
-  <text x="155" y="224" font-family="Roboto" font-size="20" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${x(from)}</text>
-  <text x="465" y="224" font-family="Roboto" font-size="20" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${x(to)}</text>
-
-  <!-- Separator -->
-  <rect x="20" y="244" width="580" height="1" fill="#0F2040"/>
-
-  <!-- Detail rows -->
-  <text x="34" y="270" font-family="Roboto" font-size="12" fill="#2A5070">Rate</text>
-  <text x="590" y="270" font-family="Roboto" font-size="12" fill="#6A90B8" text-anchor="end">${x(rate)}</text>
-
-  <text x="34" y="295" font-family="Roboto" font-size="12" fill="#2A5070">Network</text>
-  <text x="590" y="295" font-family="Roboto" font-size="12" fill="#6A90B8" text-anchor="end">STON.fi</text>
-
-  <text x="34" y="320" font-family="Roboto" font-size="12" fill="#2A5070">Time</text>
-  <text x="590" y="320" font-family="Roboto" font-size="12" fill="#6A90B8" text-anchor="end">${x(time)}</text>
-
-  <!-- Bottom separator -->
-  <rect x="20" y="338" width="580" height="1" fill="#0A1828"/>
-
-  <!-- Footer -->
-  <text x="310" y="358" font-family="Roboto" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">SAGE · BUILT ON STON.fi</text>
-</svg>`;
-
-  const resvg = await renderAsync(svg, { font: { loadSystemFonts: false, fontBuffers: [ROBOTO_FONT] } });
-  return Buffer.from(resvg.asPng());
+  const time = new Date().toUTCString().replace(' GMT', ' UTC');
+  return `✅ *Transaction Approved*\n\n` +
+    `*${from}* → *${to}*\n\n` +
+    `Rate:  ${rate}\n` +
+    `Network:  STON.fi\n` +
+    `Time:  ${time}\n\n` +
+    `_SAGE · Built on STON.fi_`;
 }
 
 // Asset cache — STON.fi search API is broken, so we cache top assets and filter client-side
@@ -1226,13 +1146,12 @@ async function runSageTool(name, input) {
       const outUnits = quote.outputUnits ?? quote.askUnits ?? '0';
       const toAmount = Number(outUnits) / 1e9;
 
-      // Send transaction card image
+      // Send transaction receipt
       try {
-        const cardBuf = await generateTxCard({ fromAmount: amount, fromToken, toAmount, toToken });
         if (waSocket && userJid) {
-          await waSocket.sendMessage(userJid, { image: cardBuf, caption: '' });
+          await waSocket.sendMessage(userJid, { text: generateTxReceipt({ fromAmount: amount, fromToken, toAmount, toToken }) });
         }
-      } catch (imgErr) { console.error('Tx card error:', imgErr.message); }
+      } catch (imgErr) { console.error('Tx receipt error:', imgErr.message); }
 
       return JSON.stringify({ success: true, swapped: amount, from: fromToken, to: toToken, expected_out: toAmount.toFixed(6) });
     } catch (e) {
