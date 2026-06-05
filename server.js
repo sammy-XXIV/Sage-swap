@@ -19,7 +19,7 @@ app.use(cors());
 app.use(express.json());
 
 const apiClient = new StonApiClient();
-const tonClient = new Client({ endpoint: 'https://toncenter.com/api/v2/jsonRPC' });
+const tonClient = new Client({ endpoint: process.env.TON_RPC_URL || 'https://toncenter.com/api/v2/jsonRPC', apiKey: process.env.TONCENTER_API_KEY || '' });
 const supabase = createClient(process.env.SUPABASE_URL||'', process.env.SUPABASE_KEY||'');
 const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
 const omniston = new Omniston({ apiUrl: 'wss://omni-ws.ston.fi' });
