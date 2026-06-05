@@ -643,12 +643,27 @@ app.get('/qr', async (req, res) => {
 <html>
 <head><title>SAGE - Scan QR</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="text-align:center;font-family:sans-serif;padding:40px;background:#0a0a0a;color:#fff">
-  <h1>🤖 Connect SAGE to WhatsApp</h1>
-  <p>Scan this QR code with your WhatsApp</p>
-  <img src="${currentQR}" style="width:280px;height:280px;border-radius:12px;margin:20px auto;display:block" />
-  <p style="color:#aaa;font-size:14px">WhatsApp → Settings → Linked Devices → Link a Device</p>
-  <p style="color:#555;font-size:12px">Auto-refreshing every 20 seconds</p>
-  <script>setTimeout(() => location.reload(), 20000)</script>
+  <h1 style="color:#00C2FF">SAGE</h1>
+  <p style="color:#aaa">Open WhatsApp → Linked Devices → Link a Device → scan below</p>
+  <div style="position:relative;display:inline-block;margin:16px auto">
+    <img src="${currentQR}" style="width:260px;height:260px;border-radius:12px;display:block;border:3px solid #00C2FF" />
+    <div id="overlay" style="display:none;position:absolute;inset:0;background:rgba(0,0,0,0.75);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:18px;color:#fff;font-weight:bold">Refreshing...</div>
+  </div>
+  <p id="timer" style="color:#00C2FF;font-size:18px;font-weight:bold;margin:8px">⏱ Scan within <span id="sec">15</span>s</p>
+  <p style="color:#555;font-size:12px">Page refreshes automatically to keep QR fresh</p>
+  <script>
+    var t = 15;
+    var iv = setInterval(function(){
+      t--;
+      document.getElementById('sec').textContent = t;
+      if(t <= 0){
+        clearInterval(iv);
+        document.getElementById('timer').textContent = '🔄 Getting fresh QR...';
+        document.getElementById('overlay').style.display='flex';
+        location.reload();
+      }
+    }, 1000);
+  </script>
 </body>
 </html>`);
 });
