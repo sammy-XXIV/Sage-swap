@@ -61,10 +61,24 @@ function fmtAmount(n) {
   return Number(n).toFixed(n < 0.01 ? 6 : 4).replace(/\.?0+$/, '');
 }
 
+async function resolveSymbol(tokenStr) {
+  const s = (tokenStr || '').replace(/^\$/, '');
+  if (s.length < 20) return s.toUpperCase(); // already a symbol
+  // Looks like a contract address — look up in asset cache
+  try {
+    const assets = await getAssets();
+    const match = assets.find(a => a.contract_address === s || a.contract_address?.toLowerCase() === s.toLowerCase());
+    if (match?.symbol) return match.symbol.toUpperCase();
+  } catch {}
+  return s.slice(0, 4) + '...' + s.slice(-4); // fallback truncation
+}
+
 async function generateTxCard({ fromAmount, fromToken, toAmount, toToken }) {
-  const from = `${fmtAmount(fromAmount)} ${(fromToken || '').replace(/^\$/, '').toUpperCase()}`;
-  const to   = `${fmtAmount(toAmount)} ${(toToken || '').replace(/^\$/, '').toUpperCase()}`;
-  const rate = fromAmount > 0 ? `1 ${(fromToken||'').replace(/^\$/,'').toUpperCase()} = ${fmtAmount(toAmount/fromAmount)} ${(toToken||'').replace(/^\$/,'').toUpperCase()}` : '';
+  const fromSym = await resolveSymbol(fromToken);
+  const toSym   = await resolveSymbol(toToken);
+  const from = `${fmtAmount(fromAmount)} ${fromSym}`;
+  const to   = `${fmtAmount(toAmount)} ${toSym}`;
+  const rate = fromAmount > 0 ? `1 ${fromSym} = ${fmtAmount(toAmount/fromAmount)} ${toSym}` : '';
   const time = new Date().toUTCString().replace(' GMT', ' UTC');
 
   const chart = {
@@ -79,7 +93,9 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken }) {
             a2: { type: 'label', xValue: 0, yValue: 82, content: 'STON.fi AGENT', color: '#2A5070', font: { size: 11 } },
             sep1: { type: 'line', yMin: 73, yMax: 73, borderColor: '#0F2040', borderWidth: 1 },
             a3: { type: 'label', xValue: 0, yValue: 65, content: '✅  TRANSACTION APPROVED', color: '#00E676', font: { size: 14, weight: 'bold' } },
-            a4: { type: 'label', xValue: 0, yValue: 50, content: `${from}  →  ${to}`, color: '#FFFFFF', font: { size: 20, weight: 'bold' } },
+            fromLabel: { type: 'label', xValue: 0, yValue: 53, content: from, color: '#FFFFFF', font: { size: 19, weight: 'bold' }, xAdjust: -120 },
+            arrow:     { type: 'label', xValue: 0, yValue: 53, content: '→', color: '#00C2FF', font: { size: 19 } },
+            toLabel:   { type: 'label', xValue: 0, yValue: 53, content: to,   color: '#00C2FF', font: { size: 19, weight: 'bold' }, xAdjust: 120 },
             sep2: { type: 'line', yMin: 38, yMax: 38, borderColor: '#0F2040', borderWidth: 1 },
             a5: { type: 'label', xValue: 0, yValue: 30, content: `Rate: ${rate}`, color: '#6A90B8', font: { size: 13 } },
             a6: { type: 'label', xValue: 0, yValue: 19, content: `DEX: STON.fi  |  Chain: TON`, color: '#6A90B8', font: { size: 13 } },
