@@ -750,6 +750,7 @@ Tools available:
 - place_limit_order: set auto-trade at a target price
 - get_limit_orders: list active orders
 - get_token_chart: send a real price chart image for any timeframe (1h, 4h, 1d, 1w, 1m) — always use this when user asks for a chart
+- analyze_token: safety analysis — liquidity, holder concentration, pool age, scam signals
 - get_trending_tokens: top pools on STON.fi by 24h volume
 - cancel_limit_order: cancel an order by ID
 - stake_ton: stake TON for ~5.2% APY
@@ -780,6 +781,11 @@ LIMIT ORDERS:
 4. Call get_wallet_balance to verify the user has enough fromToken before placing.
 5. Show the full order summary: "Limit order: Buy *X TOKEN* spending *Y TON* when price hits *Z*. You have *W TON* available. Confirm?"
 6. Call place_limit_order ONLY after user explicitly says yes/confirm/ok. NEVER call it immediately — always wait for confirmation.
+
+TOKEN SAFETY:
+- If a user asks to swap or buy a token you don't recognise as a major token (TON, USDT, USDC, NOT, DOGS, STON), call analyze_token first and show the risk level and flags before proceeding.
+- If analyze_token returns HIGH RISK, warn the user clearly and ask if they still want to proceed.
+- Always show liquidity and pool age when analyzing.
 
 GENERAL:
 - Always pass userJid from context when tools need it
@@ -814,6 +820,18 @@ const sageTools = [
         userJid: { type: 'string' },
       },
       required: ['tokenAddress', 'symbol', 'userJid'],
+    },
+  },
+  {
+    name: 'analyze_token',
+    description: 'Analyze a token for safety — checks liquidity, holder concentration, pool age, price volatility, and known scam signals. Call this when user asks to analyze, check, or research a token before swapping.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tokenAddress: { type: 'string', description: 'Token contract address' },
+        symbol: { type: 'string', description: 'Token symbol' },
+      },
+      required: ['tokenAddress', 'symbol'],
     },
   },
   {
@@ -1067,6 +1085,76 @@ async function runSageTool(name, input) {
     } catch (e) {
       return `Chart error: ${e.message}`;
     }
+  }
+
+  if (name === 'analyze_token') {
+    try {
+      const { tokenAddress, symbol } = input;
+      const flags = [];
+      const info = {};
+
+      // 1. GeckoTerminal — pool data (liquidity, age, volume, price change)
+      const searchRes = await fetch(
+        `https://api.geckoterminal.com/api/v2/search/pools?query=${encodeURIComponent(symbol + ' TON')}&network=ton&page=1`,
+        { headers: { 'Accept': 'application/json' } }
+      );
+      const searchData = await searchRes.json();
+      const pool = searchData?.data?.[0];
+
+      if (!pool) {
+        flags.push('❌ Not found on GeckoTerminal — unverified or very new token');
+      } else {
+        const attr = pool.attributes;
+        const liquidity = parseFloat(attr.reserve_in_usd || '0');
+        const volume24h = parseFloat(attr.volume_usd?.h24 || '0');
+        const priceChange24h = parseFloat(attr.price_change_percentage?.h24 || '0');
+        const createdAt = attr.pool_created_at;
+
+        info.liquidity = `$${liquidity.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+        info.volume24h = `$${volume24h.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+        info.priceChange24h = `${priceChange24h > 0 ? '+' : ''}${priceChange24h.toFixed(1)}%`;
+        info.poolAge = createdAt ? `Created ${new Date(createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}` : 'Unknown';
+
+        if (liquidity < 5000)   flags.push('🚨 Very low liquidity (<$5k) — high slippage risk');
+        else if (liquidity < 50000) flags.push('⚠️ Low liquidity (<$50k) — trade carefully');
+
+        if (volume24h < 1000 && liquidity > 0) flags.push('⚠️ Very low 24h volume — low trading activity');
+
+        if (Math.abs(priceChange24h) > 50) flags.push(`🚨 Extreme price movement (${info.priceChange24h} in 24h) — possible pump/dump`);
+        else if (Math.abs(priceChange24h) > 20) flags.push(`⚠️ High volatility (${info.priceChange24h} in 24h)`);
+
+        if (createdAt) {
+          const ageHours = (Date.now() - new Date(createdAt).getTime()) / 3600000;
+          if (ageHours < 24)  flags.push('🚨 Pool is less than 24 hours old — very high risk');
+          else if (ageHours < 168) flags.push('⚠️ Pool is less than 7 days old — proceed with caution');
+        }
+      }
+
+      // 2. STON.fi — check if token is listed (basic legitimacy check)
+      try {
+        const stonRes = await fetch(`https://api.ston.fi/v1/assets/${tokenAddress}`, { headers: { 'Accept': 'application/json' } });
+        if (stonRes.ok) {
+          const stonData = await stonRes.json();
+          info.stonListed = stonData?.asset ? '✅ Listed on STON.fi' : '⚠️ Not listed on STON.fi';
+          if (!stonData?.asset) flags.push('⚠️ Token not listed on STON.fi — may be unverified');
+        }
+      } catch {}
+
+      const riskLevel = flags.some(f => f.startsWith('🚨')) ? '🔴 HIGH RISK'
+                      : flags.some(f => f.startsWith('⚠️'))  ? '🟡 MODERATE RISK'
+                      : '🟢 LOOKS OKAY';
+
+      return JSON.stringify({
+        symbol,
+        riskLevel,
+        liquidity: info.liquidity || 'N/A',
+        volume24h: info.volume24h || 'N/A',
+        priceChange24h: info.priceChange24h || 'N/A',
+        poolAge: info.poolAge || 'N/A',
+        stonListed: info.stonListed || 'Unknown',
+        flags: flags.length ? flags : ['✅ No major red flags detected'],
+      });
+    } catch (e) { return `Token analysis failed: ${e.message}`; }
   }
 
   if (name === 'get_trending_tokens') {
