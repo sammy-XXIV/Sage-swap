@@ -555,9 +555,9 @@ const PORT = process.env.PORT||3000;
 app.listen(PORT, () => {
   console.log(`SAGE Swap on port ${PORT}`);
   // Railway marks the instance healthy once this callback fires.
-  // Wait 20s AFTER the health check passes before connecting WhatsApp —
+  // Wait 35s AFTER the health check passes before connecting WhatsApp —
   // by then Railway has sent SIGTERM to the old instance and it has
-  // disconnected cleanly (our SIGTERM handler takes ~5s).
+  // fully exited (SIGTERM handler is fast now — no 3s WS wait).
   setTimeout(() => {
     supabase.from('pending_polls').select('*').then(({ data }) => {
       if (data?.length) {
@@ -574,8 +574,8 @@ app.listen(PORT, () => {
     }).catch(() => {});
 
     startWhatsApp().catch(console.error);
-  }, 20000);
-  console.log('⏳ Waiting 20s after health check before connecting WhatsApp...');
+  }, 35000);
+  console.log('⏳ Waiting 35s after health check before connecting WhatsApp...');
 });
 
 
@@ -1510,7 +1510,13 @@ async function useSupabaseAuthState() {
     await supabase.from('whatsapp_auth').delete().eq('key', key);
   };
 
-  const creds = (await readData('creds')) || initAuthCreds();
+  const savedCreds = await readData('creds');
+  if (savedCreds) {
+    console.log('🔑 Loaded saved WhatsApp creds from Supabase — skipping QR');
+  } else {
+    console.log('⚠️  No saved creds found — QR scan required');
+  }
+  const creds = savedCreds || initAuthCreds();
   return {
     state: {
       creds,
@@ -1597,7 +1603,7 @@ async function startWhatsApp() {
       if (lockHeartbeat) { clearInterval(lockHeartbeat); lockHeartbeat = null; }
       if (intentionalClose) { intentionalClose = false; return; }
       const code = lastDisconnect?.error?.output?.statusCode;
-      console.log(`WhatsApp closed (${code})`);
+      console.log(`WhatsApp closed — code: ${code}, intentional: ${intentionalClose}, error: ${lastDisconnect?.error?.message}`);
       if (code === DisconnectReason.loggedOut) {
         console.log('🔄 Logged out — clearing session...');
         await supabase.from('whatsapp_auth').delete().not('key', 'eq', '_lock');
@@ -1772,13 +1778,13 @@ async function startWhatsApp() {
 
 // Clean shutdown on redeploy — close WhatsApp before dying so new instance can connect cleanly
 async function gracefulShutdown() {
-  console.log('🛑 Shutting down — closing WhatsApp...');
+  console.log('🛑 Shutting down — releasing lock...');
   intentionalClose = true;
   if (lockHeartbeat) clearInterval(lockHeartbeat);
   if (restartTimer) clearTimeout(restartTimer);
-  try { if (waSocket) waSocket.end(undefined); } catch {}
-  // Wait 3s so the WS close frame reaches WhatsApp servers before we exit
-  await new Promise(r => setTimeout(r, 3000));
+  // Do NOT call waSocket.end() — a proper WS close frame causes WhatsApp to
+  // invalidate the session. A raw TCP drop (process exit) is treated as a
+  // network disconnect, so the saved Supabase creds stay valid for next boot.
   await releaseLock();
   console.log('✅ Lock released, exiting.');
   process.exit(0);
