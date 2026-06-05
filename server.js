@@ -1510,6 +1510,8 @@ async function gracefulShutdown() {
   if (lockHeartbeat) clearInterval(lockHeartbeat);
   if (restartTimer) clearTimeout(restartTimer);
   try { if (waSocket) waSocket.end(undefined); } catch {}
+  // Wait 3s so the WS close frame reaches WhatsApp servers before we exit
+  await new Promise(r => setTimeout(r, 3000));
   await releaseLock();
   console.log('✅ Lock released, exiting.');
   process.exit(0);
@@ -1543,7 +1545,7 @@ supabase.from('pending_polls').select('*').then(({ data }) => {
   }
 }).catch(() => {});
 
-// Delay startup to let previous instance release lock first
-setTimeout(() => startWhatsApp().catch(console.error), 8000);
-console.log('⏳ Waiting 8s for previous instance to shut down...');
+// Delay startup to let previous instance disconnect WhatsApp and release lock
+setTimeout(() => startWhatsApp().catch(console.error), 15000);
+console.log('⏳ Waiting 15s for previous instance to shut down...');
 
