@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
-import sharp from 'sharp';
+import { renderAsync } from '@resvg/resvg-js';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, decryptPollVote } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
@@ -148,7 +148,8 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type =
   <text x="310" y="358" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">SAGE · BUILT ON STON.fi</text>
 </svg>`;
 
-  return sharp(Buffer.from(svg)).png().toBuffer();
+  const resvg = await renderAsync(svg, { font: { loadSystemFonts: true } });
+  return Buffer.from(resvg.asPng());
 }
 
 // Asset cache — STON.fi search API is broken, so we cache top assets and filter client-side

@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
+    "@resvg/resvg-js": "^2.6.2",
     "@ston-fi/api": "^0.13.0",
     "@ston-fi/omniston-sdk": "^0.8.3",
     "@ston-fi/sdk": "^2.2.0",
