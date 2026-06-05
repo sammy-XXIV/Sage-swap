@@ -1,0 +1,4 @@
+[deploy]
+healthcheckPath = "/ping"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
