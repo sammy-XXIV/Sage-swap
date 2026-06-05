@@ -2,7 +2,10 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import { renderAsync } from '@resvg/resvg-js';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, decryptPollVote } from '@whiskeysockets/baileys';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, decryptPollVote, jidNormalizedUser } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
 import Anthropic from '@anthropic-ai/sdk';
@@ -20,6 +23,8 @@ app.use(express.json());
 
 const apiClient = new StonApiClient();
 const tonClient = new Client({ endpoint: process.env.TON_RPC_URL || 'https://toncenter.com/api/v2/jsonRPC', apiKey: process.env.TONCENTER_API_KEY || '' });
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROBOTO_FONT = readFileSync(path.join(__dirname, 'fonts', 'Roboto.ttf'));
 const supabase = createClient(process.env.SUPABASE_URL||'', process.env.SUPABASE_KEY||'');
 const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
 const omniston = new Omniston({ apiUrl: 'wss://omni-ws.ston.fi' });
@@ -98,9 +103,9 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type =
   <rect x="0" y="5" width="4" height="360" rx="2" fill="url(#blueBar)"/>
 
   <!-- SAGE branding -->
-  <text x="34" y="46" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="bold" fill="#00C2FF">SAGE</text>
-  <text x="34" y="64" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="11" fill="#1E3A60" letter-spacing="2">STON.fi AGENT</text>
-  <text x="600" y="50" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#1A3050" text-anchor="end">${x(type)}</text>
+  <text x="34" y="46" font-family="Roboto" font-size="22" font-weight="bold" fill="#00C2FF">SAGE</text>
+  <text x="34" y="64" font-family="Roboto" font-size="11" fill="#1E3A60" letter-spacing="2">STON.fi AGENT</text>
+  <text x="600" y="50" font-family="Roboto" font-size="12" fill="#1A3050" text-anchor="end">${x(type)}</text>
 
   <!-- Glowing separator -->
   <rect x="20" y="76" width="580" height="1" fill="url(#glowLine)"/>
@@ -110,45 +115,45 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, type =
   <path d="M298 118 L307 127 L323 109" fill="none" stroke="#00E676" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- APPROVED label -->
-  <text x="310" y="158" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#00E676" text-anchor="middle" letter-spacing="3">TRANSACTION APPROVED</text>
+  <text x="310" y="158" font-family="Roboto" font-size="13" font-weight="bold" fill="#00E676" text-anchor="middle" letter-spacing="3">TRANSACTION APPROVED</text>
 
   <!-- Separator -->
   <rect x="20" y="172" width="580" height="1" fill="#0F2040"/>
 
   <!-- FROM label -->
-  <text x="155" y="200" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#2A5070" text-anchor="middle" letter-spacing="2">FROM</text>
+  <text x="155" y="200" font-family="Roboto" font-size="10" fill="#2A5070" text-anchor="middle" letter-spacing="2">FROM</text>
   <!-- TO label -->
-  <text x="465" y="200" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#2A5070" text-anchor="middle" letter-spacing="2">TO</text>
+  <text x="465" y="200" font-family="Roboto" font-size="10" fill="#2A5070" text-anchor="middle" letter-spacing="2">TO</text>
 
   <!-- Arrow -->
   <line x1="258" y1="212" x2="355" y2="212" stroke="#00C2FF" stroke-width="1.5"/>
   <path d="M348 206 L356 212 L348 218" fill="none" stroke="#00C2FF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- Amounts -->
-  <text x="155" y="224" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${x(from)}</text>
-  <text x="465" y="224" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${x(to)}</text>
+  <text x="155" y="224" font-family="Roboto" font-size="20" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${x(from)}</text>
+  <text x="465" y="224" font-family="Roboto" font-size="20" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${x(to)}</text>
 
   <!-- Separator -->
   <rect x="20" y="244" width="580" height="1" fill="#0F2040"/>
 
   <!-- Detail rows -->
-  <text x="34" y="270" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#2A5070">Rate</text>
-  <text x="590" y="270" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">${x(rate)}</text>
+  <text x="34" y="270" font-family="Roboto" font-size="12" fill="#2A5070">Rate</text>
+  <text x="590" y="270" font-family="Roboto" font-size="12" fill="#6A90B8" text-anchor="end">${x(rate)}</text>
 
-  <text x="34" y="295" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#2A5070">Network</text>
-  <text x="590" y="295" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">STON.fi</text>
+  <text x="34" y="295" font-family="Roboto" font-size="12" fill="#2A5070">Network</text>
+  <text x="590" y="295" font-family="Roboto" font-size="12" fill="#6A90B8" text-anchor="end">STON.fi</text>
 
-  <text x="34" y="320" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#2A5070">Time</text>
-  <text x="590" y="320" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="12" fill="#6A90B8" text-anchor="end">${x(time)}</text>
+  <text x="34" y="320" font-family="Roboto" font-size="12" fill="#2A5070">Time</text>
+  <text x="590" y="320" font-family="Roboto" font-size="12" fill="#6A90B8" text-anchor="end">${x(time)}</text>
 
   <!-- Bottom separator -->
   <rect x="20" y="338" width="580" height="1" fill="#0A1828"/>
 
   <!-- Footer -->
-  <text x="310" y="358" font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">SAGE · BUILT ON STON.fi</text>
+  <text x="310" y="358" font-family="Roboto" font-size="10" fill="#142030" text-anchor="middle" letter-spacing="1">SAGE · BUILT ON STON.fi</text>
 </svg>`;
 
-  const resvg = await renderAsync(svg, { font: { loadSystemFonts: true } });
+  const resvg = await renderAsync(svg, { font: { loadSystemFonts: false, fontBuffers: [ROBOTO_FONT] } });
   return Buffer.from(resvg.asPng());
 }
 
@@ -1727,16 +1732,17 @@ async function startWhatsApp() {
 
         try {
           const decrypted = decryptPollVote(msg.message.pollUpdateMessage.vote, {
-            pollCreatorJid: sock.user.id,
+            pollCreatorJid: jidNormalizedUser(sock.user.id),
             pollMsgId: pollInfo.msgKey.id,
             pollEncKey: pollInfo.encKey,
-            voterJid: jid,
+            voterJid: jidNormalizedUser(msg.key.participant || jid),
           });
           if (decrypted.selectedOptions?.length > 0) {
             const selectedOption = pollInfo.options.find(opt => {
               const hash = crypto.createHash('sha256').update(opt).digest();
               return decrypted.selectedOptions.some(h => Buffer.from(h).equals(hash));
             });
+            console.log(`🗳️ Poll vote — options: ${JSON.stringify(pollInfo.options)}, matched: ${selectedOption || 'NONE'}, selectedHashes: ${decrypted.selectedOptions?.length}`);
             if (selectedOption) {
               pendingPolls.delete(jid);
               supabase.from('pending_polls').delete().eq('jid', jid).then(() => {}).catch(() => {});
