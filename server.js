@@ -61,17 +61,43 @@ function fmtAmount(n) {
   return Number(n).toFixed(n < 0.01 ? 6 : 4).replace(/\.?0+$/, '');
 }
 
-function generateTxReceipt({ fromAmount, fromToken, toAmount, toToken }) {
+async function generateTxCard({ fromAmount, fromToken, toAmount, toToken }) {
   const from = `${fmtAmount(fromAmount)} ${(fromToken || '').replace(/^\$/, '').toUpperCase()}`;
   const to   = `${fmtAmount(toAmount)} ${(toToken || '').replace(/^\$/, '').toUpperCase()}`;
   const rate = fromAmount > 0 ? `1 ${(fromToken||'').replace(/^\$/,'').toUpperCase()} = ${fmtAmount(toAmount/fromAmount)} ${(toToken||'').replace(/^\$/,'').toUpperCase()}` : '';
   const time = new Date().toUTCString().replace(' GMT', ' UTC');
-  return `✅ *Transaction Approved*\n\n` +
-    `*${from}* → *${to}*\n\n` +
-    `Rate:  ${rate}\n` +
-    `Network:  STON.fi\n` +
-    `Time:  ${time}\n\n` +
-    `_SAGE · Built on STON.fi_`;
+
+  const chart = {
+    type: 'bar',
+    data: { labels: [' '], datasets: [{ data: [0], backgroundColor: 'transparent' }] },
+    options: {
+      plugins: {
+        legend: { display: false },
+        annotation: {
+          annotations: {
+            a1: { type: 'label', xValue: 0, yValue: 92, content: 'SAGE', color: '#00C2FF', font: { size: 26, weight: 'bold' } },
+            a2: { type: 'label', xValue: 0, yValue: 82, content: 'STON.fi AGENT', color: '#2A5070', font: { size: 11 } },
+            sep1: { type: 'line', yMin: 73, yMax: 73, borderColor: '#0F2040', borderWidth: 1 },
+            a3: { type: 'label', xValue: 0, yValue: 65, content: '✅  TRANSACTION APPROVED', color: '#00E676', font: { size: 14, weight: 'bold' } },
+            a4: { type: 'label', xValue: 0, yValue: 50, content: `${from}  →  ${to}`, color: '#FFFFFF', font: { size: 20, weight: 'bold' } },
+            sep2: { type: 'line', yMin: 38, yMax: 38, borderColor: '#0F2040', borderWidth: 1 },
+            a5: { type: 'label', xValue: 0, yValue: 30, content: `Rate: ${rate}`, color: '#6A90B8', font: { size: 13 } },
+            a6: { type: 'label', xValue: 0, yValue: 19, content: `DEX: STON.fi  |  Chain: TON`, color: '#6A90B8', font: { size: 13 } },
+            a7: { type: 'label', xValue: 0, yValue: 8,  content: time, color: '#3A5570', font: { size: 11 } },
+          }
+        }
+      },
+      scales: { x: { display: false }, y: { display: false, min: 0, max: 100 } }
+    }
+  };
+
+  const res = await fetch('https://quickchart.io/chart', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chart, width: 620, height: 340, backgroundColor: '#060D1F', format: 'png', version: 4 }),
+  });
+  if (!res.ok) throw new Error(`QuickChart ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
 }
 
 // Asset cache — STON.fi search API is broken, so we cache top assets and filter client-side
@@ -1146,12 +1172,19 @@ async function runSageTool(name, input) {
       const outUnits = quote.outputUnits ?? quote.askUnits ?? '0';
       const toAmount = Number(outUnits) / 1e9;
 
-      // Send transaction receipt
+      // Send transaction card via QuickChart
       try {
         if (waSocket && userJid) {
-          await waSocket.sendMessage(userJid, { text: generateTxReceipt({ fromAmount: amount, fromToken, toAmount, toToken }) });
+          const cardBuf = await generateTxCard({ fromAmount: amount, fromToken, toAmount, toToken });
+          await waSocket.sendMessage(userJid, { image: cardBuf, caption: '' });
         }
-      } catch (imgErr) { console.error('Tx receipt error:', imgErr.message); }
+      } catch (imgErr) {
+        console.error('Tx card error:', imgErr.message);
+        // fallback to text receipt
+        const from = `${fmtAmount(amount)} ${(fromToken||'').toUpperCase()}`;
+        const to   = `${fmtAmount(toAmount)} ${(toToken||'').toUpperCase()}`;
+        try { if (waSocket && userJid) await waSocket.sendMessage(userJid, { text: `✅ *Swapped ${from} → ${to}*` }); } catch {}
+      }
 
       return JSON.stringify({ success: true, swapped: amount, from: fromToken, to: toToken, expected_out: toAmount.toFixed(6) });
     } catch (e) {
