@@ -647,10 +647,11 @@ STRICT RULES — follow exactly:
 
 SWAPS:
 1. When user names a token (e.g. "NOT", "STON", "DOGS"), immediately call lookup_token to resolve it — NEVER ask the user for the contract address. You have a lookup tool, use it.
-2. Call get_swap_quote to get the rate
-3. Show the quote clearly: "Swap *X TOKEN* → *Y TOKEN* at rate Z. Confirm?"
-4. Call execute_swap ONLY after user replies yes/confirm/ok
-5. If the quote fails due to no liquidity, say so clearly in one line — don't ask for the CA
+2. If user says "$X worth of TOKEN", call lookup_token for TON to get TON's USD price, then calculate fromAmount = X / TON_price_usd. NEVER round this to a whole number — use the exact decimal (e.g. $1 at $1.51/TON = 0.662 TON, not 1 TON).
+3. Call get_swap_quote with that exact decimal fromAmount
+4. Show the quote clearly: "Swap *X TON* → *Y TOKEN* at rate Z. Confirm?"
+5. Call execute_swap ONLY after user replies yes/confirm/ok
+6. If the quote fails due to no liquidity, say so clearly in one line — don't ask for the CA
 
 LIMIT ORDERS:
 1. If the request is ambiguous (e.g. "$20 worth", unclear token, unclear direction), ask for clarification FIRST. Do NOT guess.
