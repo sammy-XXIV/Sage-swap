@@ -3,9 +3,7 @@ import cors from 'cors';
 import crypto from 'crypto';
 import { renderAsync } from '@resvg/resvg-js';
 import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import path from 'path';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, decryptPollVote, jidNormalizedUser } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, decryptPollVote } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import Pino from 'pino';
 import Anthropic from '@anthropic-ai/sdk';
@@ -23,8 +21,7 @@ app.use(express.json());
 
 const apiClient = new StonApiClient();
 const tonClient = new Client({ endpoint: process.env.TON_RPC_URL || 'https://toncenter.com/api/v2/jsonRPC', apiKey: process.env.TONCENTER_API_KEY || '' });
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROBOTO_FONT = readFileSync(path.join(__dirname, 'fonts', 'Roboto.ttf'));
+const ROBOTO_FONT = readFileSync(new URL('./fonts/Roboto.ttf', import.meta.url));
 const supabase = createClient(process.env.SUPABASE_URL||'', process.env.SUPABASE_KEY||'');
 const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
 const omniston = new Omniston({ apiUrl: 'wss://omni-ws.ston.fi' });
@@ -1732,10 +1729,10 @@ async function startWhatsApp() {
 
         try {
           const decrypted = decryptPollVote(msg.message.pollUpdateMessage.vote, {
-            pollCreatorJid: jidNormalizedUser(sock.user.id),
+            pollCreatorJid: sock.user.id,
             pollMsgId: pollInfo.msgKey.id,
             pollEncKey: pollInfo.encKey,
-            voterJid: jidNormalizedUser(msg.key.participant || jid),
+            voterJid: jid,
           });
           if (decrypted.selectedOptions?.length > 0) {
             const selectedOption = pollInfo.options.find(opt => {
