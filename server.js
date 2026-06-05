@@ -11,6 +11,8 @@ import { WalletContractV4, internal } from '@ton/ton';
 import { createClient } from '@supabase/supabase-js';
 import { DEX, pTON, FARM, Client } from '@ston-fi/sdk';
 import { StonApiClient } from '@ston-fi/api';
+import { Omniston, isSwapQuote } from '@ston-fi/omniston-sdk';
+import { Cell } from '@ton/ton';
 
 const app = express();
 app.use(cors());
@@ -20,6 +22,37 @@ const apiClient = new StonApiClient();
 const tonClient = new Client({ endpoint: 'https://toncenter.com/api/v2/jsonRPC' });
 const supabase = createClient(process.env.SUPABASE_URL||'', process.env.SUPABASE_KEY||'');
 const TON_NATIVE = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
+const omniston = new Omniston({ apiUrl: 'wss://omni-ws.ston.fi' });
+
+// Build Omniston AssetId for TON native or jetton address
+const makeAssetId = (addr) => addr === TON_NATIVE
+  ? { chain: { $case: 'ton', value: { kind: { $case: 'native', value: {} } } } }
+  : { chain: { $case: 'ton', value: { kind: { $case: 'jetton', value: addr } } } };
+
+// Get a quote from Omniston with 15s timeout
+async function getOmnistonQuote(fromAddr, toAddr, offerUnits) {
+  const quoteRequest = {
+    inputAsset: makeAssetId(fromAddr),
+    outputAsset: makeAssetId(toAddr),
+    amount: { $case: 'inputUnits', value: String(offerUnits) },
+    settlementParams: [{
+      params: { $case: 'swap', value: { maxPriceSlippagePips: 10_000 } },
+    }],
+  };
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { sub.unsubscribe(); reject(new Error('No quote received — no liquidity or timeout')); }, 15000);
+    const sub = omniston.requestForQuote(quoteRequest).subscribe({
+      next(event) {
+        if (event?.$case === 'quoteUpdated') {
+          clearTimeout(timeout); sub.unsubscribe(); resolve(event.value);
+        } else if (event?.$case === 'noQuote') {
+          clearTimeout(timeout); sub.unsubscribe(); reject(new Error('No liquidity available via Omniston'));
+        }
+      },
+      error(err) { clearTimeout(timeout); reject(err); },
+    });
+  });
+}
 
 // ── Transaction Card Generator ────────────────────────────────────────────────
 function fmtAmount(n) {
@@ -1141,31 +1174,45 @@ async function runSageTool(name, input) {
         return match.contract_address;
       };
       const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
-      const offerUnits = String(BigInt(Math.round(amount * 1e9)));
+      const offerUnits = BigInt(Math.round(amount * 1e9));
       await setProgress(2);
 
-      const sim = await apiClient.simulateSwap({ offerAddress: fromAddr, askAddress: toAddr, offerUnits, slippageTolerance: '0.01' });
-      if (!sim.askUnits) throw new Error('No liquidity for this pair');
-      const router = tonClient.open(new DEX.v1.Router());
-      const proxyTon = new pTON.v1();
-      const isTon = fromAddr === TON_NATIVE;
-      const isTonAsk = toAddr === TON_NATIVE;
-      let txParams;
-      if (isTon) txParams = await router.getSwapTonToJettonTxParams({ userWalletAddress: wallet.address.toString(), proxyTon, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
-      else if (isTonAsk) txParams = await router.getSwapJettonToTonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), proxyTon, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
-      else txParams = await router.getSwapJettonToJettonTxParams({ userWalletAddress: wallet.address.toString(), offerJettonAddress: fromAddr, offerAmount: BigInt(offerUnits), askJettonAddress: toAddr, minAskAmount: BigInt(sim.minAskUnits), queryId: Date.now() });
+      // Get best quote via Omniston aggregator
+      const quote = await getOmnistonQuote(fromAddr, toAddr, offerUnits);
+      if (!isSwapQuote(quote)) throw new Error('No swap quote available');
       await setProgress(3);
+
+      // Build transaction messages from Omniston
+      const walletAddrStr = wallet.address.toString({ bounceable: false, urlSafe: true });
+      const traderAddr = { chain: { $case: 'ton', value: walletAddrStr } };
+      const swapTx = await omniston.tonBuildSwap({
+        quoteId: quote.quoteId,
+        transferSrcAddress: traderAddr,
+        refundSrcAddress: traderAddr,
+        gasExcessAddress: traderAddr,
+        traderDstAddress: traderAddr,
+      });
+      if (!swapTx?.messages?.length) throw new Error('Failed to build swap transaction');
 
       const seqno = await contract.getSeqno();
       await setProgress(4);
-      await contract.sendTransfer({ seqno, secretKey: keyPair.secretKey, messages: [internal({ to: txParams.to, value: txParams.value, body: txParams.body })] });
 
-      // Final progress update
+      await contract.sendTransfer({
+        seqno,
+        secretKey: keyPair.secretKey,
+        messages: swapTx.messages.map(msg => internal({
+          to: msg.targetAddress,
+          value: BigInt(msg.sendAmount),
+          body: Cell.fromBase64(msg.payload),
+        })),
+      });
+
       if (waSocket && userJid && progressKey) {
         await waSocket.sendMessage(userJid, { text: '✅ *Swap submitted!*\n▓▓▓▓▓▓▓▓▓▓ 100%', edit: progressKey });
       }
 
-      const toAmount = Number(sim.askUnits) / 1e9;
+      const outUnits = quote.outputUnits ?? quote.askUnits ?? '0';
+      const toAmount = Number(outUnits) / 1e9;
 
       // Send transaction card image
       try {
@@ -1196,22 +1243,17 @@ async function runSageTool(name, input) {
         return match.contract_address;
       };
       const [fromAddr, toAddr] = await Promise.all([resolveAddr(fromToken), resolveAddr(toToken)]);
-      const offerUnits = String(BigInt(Math.round(amount * 1e9)));
-      const sim = await apiClient.simulateSwap({
-        offerAddress: fromAddr,
-        askAddress: toAddr,
-        offerUnits,
-        slippageTolerance: '0.01',
-      });
-      const outAmount = (Number(sim.askUnits) / 1e9).toFixed(6);
+      const offerUnits = BigInt(Math.round(amount * 1e9));
+      const quote = await getOmnistonQuote(fromAddr, toAddr, offerUnits);
+      const outUnits = quote.outputUnits ?? quote.askUnits ?? '0';
+      const outAmount = (Number(outUnits) / 1e9).toFixed(6);
+      const rate = amount > 0 ? (Number(outUnits) / 1e9 / amount).toFixed(4) : '0';
       return JSON.stringify({
-        from: fromToken,
-        to: toToken,
-        input_amount: amount,
-        output_amount: outAmount,
-        swap_rate: sim.swapRate,
-        price_impact: sim.priceImpact,
-        min_received: (Number(sim.minAskUnits) / 1e9).toFixed(6),
+        from: fromToken, to: toToken,
+        input_amount: amount, output_amount: outAmount,
+        swap_rate: rate,
+        min_received: outAmount,
+        source: 'Omniston (aggregated)',
       });
     } catch (e) {
       return `Error getting swap quote: ${e.message}`;

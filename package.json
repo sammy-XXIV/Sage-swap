@@ -9,6 +9,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
     "@ston-fi/api": "^0.13.0",
+    "@ston-fi/omniston-sdk": "^0.8.3",
     "@ston-fi/sdk": "^2.2.0",
     "@supabase/supabase-js": "^2.39.0",
     "@ton/crypto": "^3.3.0",
