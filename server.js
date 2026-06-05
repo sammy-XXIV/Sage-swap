@@ -1218,7 +1218,7 @@ async function runSageTool(name, input) {
         messages: swapTx.messages.map(msg => internal({
           to: msg.targetAddress,
           value: BigInt(msg.sendAmount),
-          body: Cell.fromBase64(msg.payload),
+          body: Cell.fromBoc(Buffer.from(msg.payload, 'hex'))[0],
         })),
       });
 
