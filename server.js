@@ -1723,25 +1723,25 @@ async function runSageTool(name, input) {
         });
       }
 
-      // Wait for on-chain confirmation and grab tx hash
-      const txHash = await waitForTxHash(walletAddr, preLt);
-      const hashShort = txHash ? `${txHash.slice(0, 8)}...${txHash.slice(-8)}` : null;
-      const explorerUrl = txHash ? `https://tonviewer.com/transaction/${txHash}` : null;
-
-      // Queue receipt card
+      // Send receipt card immediately — no waiting
       try {
         const cardBuf = await generateTxCard({
           fromAmount: amount, fromToken: symbol,
           toAmount: 0, toToken: truncatedDest,
           mode: 'withdraw',
         });
-        const caption = explorerUrl
-          ? `${amount} ${symbol} sent to ${truncatedDest}\nTx: ${hashShort}\n${explorerUrl}`
-          : `${amount} ${symbol} sent to ${truncatedDest}`;
-        pendingImages.set(userJid, { buffer: cardBuf, caption });
+        pendingImages.set(userJid, { buffer: cardBuf, caption: `${amount} ${symbol} sent to ${truncatedDest}` });
       } catch {}
 
-      return JSON.stringify({ success: true, sent: amount, symbol, to: toAddress, txHash: txHash || undefined });
+      // Follow up with tx hash in background — don't block the response
+      waitForTxHash(walletAddr, preLt, 20000).then(txHash => {
+        if (!txHash || !waSocket || !waConnected) return;
+        const hashShort = `${txHash.slice(0, 8)}...${txHash.slice(-8)}`;
+        const explorerUrl = `https://tonviewer.com/transaction/${txHash}`;
+        waSocket.sendMessage(userJid, { text: `Tx: ${hashShort}\n${explorerUrl}` }).catch(() => {});
+      });
+
+      return JSON.stringify({ success: true, sent: amount, symbol, to: toAddress });
     } catch (e) { return `Withdrawal failed: ${e.message}`; }
   }
 
