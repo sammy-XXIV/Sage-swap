@@ -1008,18 +1008,29 @@ async function runSageTool(name, input) {
       };
       const { interval, aggregate, limit } = tfMap[timeframe] || tfMap['1d'];
 
+      const fetchWithTimeout = (url, opts = {}, ms = 12000) => {
+        const ctrl = new AbortController();
+        const id = setTimeout(() => ctrl.abort(), ms);
+        return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(id));
+      };
+
       // Try token-pools lookup, fall back to search API if 404 (GeckoTerminal address format mismatch)
       let poolAddress, isBase = true;
-      const tokenPoolsRes = await fetch(
-        `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${tokenAddress}/pools?page=1`,
-        { headers: { 'Accept': 'application/json' } }
-      );
-      const tokenPoolsData = await tokenPoolsRes.json();
-      let topPool = tokenPoolsData?.data?.[0];
+      let topPool = null;
+      try {
+        const tokenPoolsRes = await fetchWithTimeout(
+          `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${tokenAddress}/pools?page=1`,
+          { headers: { 'Accept': 'application/json' } }
+        );
+        if (tokenPoolsRes.ok) {
+          const tokenPoolsData = await tokenPoolsRes.json();
+          topPool = tokenPoolsData?.data?.[0];
+        }
+      } catch {}
 
       if (!topPool) {
         // Fall back to search by symbol
-        const searchRes = await fetch(
+        const searchRes = await fetchWithTimeout(
           `https://api.geckoterminal.com/api/v2/search/pools?query=${encodeURIComponent(symbol + ' TON')}&network=ton&page=1`,
           { headers: { 'Accept': 'application/json' } }
         );
@@ -1027,7 +1038,6 @@ async function runSageTool(name, input) {
         topPool = searchData?.data?.[0];
         if (!topPool) return `No trading pool found for ${symbol} on GeckoTerminal.`;
         poolAddress = topPool.attributes?.address;
-        // In search results base token is always first in the pair name
         const pairName = topPool.attributes?.name || '';
         isBase = pairName.toUpperCase().startsWith(symbol.toUpperCase());
       } else {
@@ -1037,11 +1047,14 @@ async function runSageTool(name, input) {
         isBase = baseTokenId.toLowerCase().includes(normalizedAddr);
       }
 
+      if (!poolAddress) return `Could not resolve pool address for ${symbol}.`;
+
       // Fetch OHLCV using GeckoTerminal's own pool address
-      const geckoRes = await fetch(
+      const geckoRes = await fetchWithTimeout(
         `https://api.geckoterminal.com/api/v2/networks/ton/pools/${poolAddress}/ohlcv/${interval}?aggregate=${aggregate}&limit=${limit}`,
         { headers: { 'Accept': 'application/json' } }
       );
+      if (!geckoRes.ok) return `GeckoTerminal returned ${geckoRes.status} for ${symbol} OHLCV data.`;
       const geckoData = await geckoRes.json();
       const ohlcv = geckoData?.data?.attributes?.ohlcv_list;
       if (!ohlcv?.length) return `No price history available for ${symbol}.`;
@@ -1101,9 +1114,12 @@ async function runSageTool(name, input) {
         },
       };
 
-      const chartUrl = `https://quickchart.io/chart?v=2&c=${encodeURIComponent(JSON.stringify(chartConfig))}&width=700&height=320&backgroundColor=%230d0d0d`;
-      const imgRes = await fetch(chartUrl);
-      if (!imgRes.ok) return `Failed to generate chart image.`;
+      const imgRes = await fetch('https://quickchart.io/chart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chart: chartConfig, width: 700, height: 320, backgroundColor: '#0d0d0d', version: 2 }),
+      });
+      if (!imgRes.ok) return `Failed to generate chart image (QuickChart ${imgRes.status}).`;
       const buffer = Buffer.from(await imgRes.arrayBuffer());
 
       const changePct = firstOpen !== 0 ? ((lastClose - firstOpen) / firstOpen * 100).toFixed(2) : '0.00';
