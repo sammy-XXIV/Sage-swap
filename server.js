@@ -61,6 +61,21 @@ function fmtAmount(n) {
   return Number(n).toFixed(n < 0.01 ? 6 : 4).replace(/\.?0+$/, '');
 }
 
+async function waitForTxHash(address, preLt, maxWaitMs = 12000) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const res = await fetch(`https://tonapi.io/v2/accounts/${address}/transactions?limit=5`, { headers: { Accept: 'application/json' } });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const newTx = (data.transactions || []).find(tx => BigInt(tx.lt) > BigInt(preLt));
+      if (newTx?.hash) return Buffer.from(newTx.hash, 'base64').toString('hex');
+    } catch {}
+  }
+  return null;
+}
+
 async function resolveSymbol(tokenStr) {
   const s = (tokenStr || '').replace(/^\$/, '');
   if (s.length < 20) return s.toUpperCase(); // already a symbol
@@ -1560,8 +1575,16 @@ async function runSageTool(name, input) {
       const contract = tonClient.open(wallet);
       const { Address, beginCell } = await import('@ton/ton');
 
-      const seqno = await contract.getSeqno();
+      const walletAddr = wallet.address.toString({ bounceable: false, urlSafe: true });
 
+      // Record latest LT before sending so we can find the new tx
+      let preLt = 0n;
+      try {
+        const preTxRes = await fetch(`https://tonapi.io/v2/accounts/${walletAddr}/transactions?limit=1`, { headers: { Accept: 'application/json' } });
+        if (preTxRes.ok) { const d = await preTxRes.json(); preLt = BigInt(d.transactions?.[0]?.lt || 0); }
+      } catch {}
+
+      const seqno = await contract.getSeqno();
       const truncatedDest = `${toAddress.slice(0, 6)}...${toAddress.slice(-4)}`;
 
       if (token === 'TON' || token === 'ton') {
@@ -1572,8 +1595,7 @@ async function runSageTool(name, input) {
           messages: [internal({ to: toAddress, value: nanoAmount, bounce: false })],
         });
       } else {
-        const senderAddr = wallet.address.toString({ bounceable: false, urlSafe: true });
-        const jwRes = await fetch(`https://api.ston.fi/v1/jetton/${token}/address?owner_address=${senderAddr}`);
+        const jwRes = await fetch(`https://api.ston.fi/v1/jetton/${token}/address?owner_address=${walletAddr}`);
         const jwData = await jwRes.json();
         if (!jwData?.address) return `Could not find ${symbol} jetton wallet for your address.`;
         const jettonWalletAddr = jwData.address;
@@ -1588,7 +1610,7 @@ async function runSageTool(name, input) {
           .storeUint(Date.now(), 64)
           .storeCoins(tokenUnits)
           .storeAddress(Address.parse(toAddress))
-          .storeAddress(Address.parse(wallet.address.toString({ bounceable: false, urlSafe: true })))
+          .storeAddress(Address.parse(walletAddr))
           .storeBit(0)
           .storeCoins(BigInt('1'))
           .storeBit(0)
@@ -1601,6 +1623,11 @@ async function runSageTool(name, input) {
         });
       }
 
+      // Wait for on-chain confirmation and grab tx hash
+      const txHash = await waitForTxHash(walletAddr, preLt);
+      const hashShort = txHash ? `${txHash.slice(0, 8)}...${txHash.slice(-8)}` : null;
+      const explorerUrl = txHash ? `https://tonviewer.com/transaction/${txHash}` : null;
+
       // Queue receipt card
       try {
         const cardBuf = await generateTxCard({
@@ -1608,10 +1635,13 @@ async function runSageTool(name, input) {
           toAmount: 0, toToken: truncatedDest,
           mode: 'withdraw',
         });
-        pendingImages.set(userJid, { buffer: cardBuf, caption: `${amount} ${symbol} sent to ${truncatedDest}` });
+        const caption = explorerUrl
+          ? `${amount} ${symbol} sent to ${truncatedDest}\nTx: ${hashShort}\n${explorerUrl}`
+          : `${amount} ${symbol} sent to ${truncatedDest}`;
+        pendingImages.set(userJid, { buffer: cardBuf, caption });
       } catch {}
 
-      return JSON.stringify({ success: true, sent: amount, symbol, to: toAddress });
+      return JSON.stringify({ success: true, sent: amount, symbol, to: toAddress, txHash: txHash || undefined });
     } catch (e) { return `Withdrawal failed: ${e.message}`; }
   }
 
