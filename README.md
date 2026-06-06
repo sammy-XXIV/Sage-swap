@@ -1,149 +1,153 @@
-# SAGE — AI DeFi Agent for STON.fi
+# SAGE — WhatsApp DeFi Agent on TON
 
-> Your intelligent DeFi co-pilot on TON blockchain. Swap, stake, farm, and set limit orders — all through natural conversation.
-
-![SAGE](https://sammy-xxiv.github.io/sage-app)
-
-## 🔗 Live Demo
-**[sammy-xxiv.github.io/sage-app](https://sammy-xxiv.github.io/sage-app)**
+> Your autonomous DeFi agent, right in WhatsApp. Swap, stake, withdraw, and track your portfolio on STON.fi — all through plain conversation.
 
 ---
 
 ## What is SAGE?
 
-SAGE is a Telegram Mini App AI agent built on top of STON.fi. Instead of navigating complex DeFi interfaces, users simply talk to SAGE in plain English and it executes on-chain actions automatically.
+SAGE is a WhatsApp bot powered by Claude AI that gives you full DeFi access on the TON blockchain without leaving your chat. It holds a custodial wallet for each user, executes real on-chain transactions, and alerts you when funds arrive.
 
-**"Swap 0.1 TON to NOT"** → SAGE simulates, builds the transaction, and opens your wallet for signing.
+**"Swap 0.5 TON to NOT"** → SAGE quotes, confirms, executes, and sends a transaction receipt card.
 
-**"Buy $0.20 TON with USDT when TON hits $1.20"** → SAGE creates a limit order, generates a dedicated agentic wallet, monitors the price, and executes automatically when the price is hit — while you sleep.
+**"Withdraw 1 TON to EQabc..."** → SAGE confirms the address, sends, and follows up with the tx hash and Tonviewer link.
 
----
-
-## ✨ Features
-
-### 🔄 Instant Swaps
-- Any token pair on STON.fi (TON, USDT, NOT, STON, DOGS, any jetton)
-- Real-time price simulation via STON.fi SDK
-- Slippage protection with auto-retry
-- Number formatting (25M, 1.2K etc)
-
-### 📋 Autonomous Limit Orders
-- Set buy/sell triggers at target prices
-- Per-user agentic wallets generated and encrypted server-side
-- Price monitoring every 30 seconds via Render backend
-- Auto-executes swap when price hits target
-- Automatically sends proceeds back to user's main wallet
-- Works while you're offline or asleep
-
-### 🔒 Dual Staking
-- **TON Stakers** — liquid stake TON → receive tsTON (~5% APY, no lock-up)
-- **STON.fi STON Staking** — lock STON → earn GEMSTON + ARKENSTON NFT
-- Side-by-side comparison card with APY, risk, and lock-up info
-
-### 💧 Liquidity & Farming
-- Add liquidity to any STON.fi pool
-- Stake LP tokens in farms directly from the agent
-- Yield calculator on all APR cards (7d / 30d / 90d / 1yr projections)
-
-### 📊 Portfolio Intelligence
-- Real-time wallet data (TON + all jettons)
-- DeFi positions (LP, farms, staking)
-- Personalized yield recommendations based on actual holdings
-- Recent swap history
-
-### 📈 Live Market Data
-- Real-time price ticker (TON, NOT, DOGS, STON, USDT)
-- Price alerts via AI conversation
+**"What's the best way to earn with my holdings?"** → SAGE reads your portfolio and gives a direct recommendation.
 
 ---
 
-## 🏗️ Architecture
+## Features
+
+### Swaps
+- Any token pair on STON.fi via the Omniston RFQ SDK
+- Quote first, confirm, then execute — never skips a step
+- Progress bar edits in-place as the swap processes
+- Transaction receipt card sent on success (token symbols, rate, timestamp)
+- Friendly error messages for low liquidity, insufficient gas, and failed quotes
+
+### Withdrawals
+- Send TON or any jetton to an external address
+- Confirmation step with truncated destination address
+- Receipt card sent instantly after transfer
+- Tx hash + Tonviewer link sent as a follow-up once indexed on-chain
+
+### Staking
+- Stake TON via TON Stakers for ~5.2% APY
+- Executes directly from the SAGE wallet
+
+### Limit Orders
+- Set auto-buy or auto-sell triggers at a target price
+- Price monitored every 30 seconds
+- Auto-executes and returns proceeds when price hits target
+
+### Portfolio Analysis
+- Check balance (TON + all jettons with USD values)
+- Ask SAGE to analyse your portfolio and it gives a direct action plan per holding
+- Recent transaction history with tx hashes
+
+### Price & Market Data
+- Live token prices, 24h change, volume, TVL, liquidity via GeckoTerminal
+- Price charts for any timeframe (1h, 4h, 1d, 1w, 1m) sent as images
+- Trending tokens on STON.fi by volume
+- Token safety analysis — liquidity, pool age, price volatility, scam signals
+- Real crypto market opinions when you ask "what should I buy?"
+
+### Incoming Transfer Alerts
+- SAGE monitors your wallet every 30 seconds
+- Instant WhatsApp alert when TON or any jetton arrives
+
+### Wallet Management
+- Custodial wallet generated per user, encrypted at rest
+- Seed phrase viewable within 24 hours of creation
+- Import existing wallet via 24-word seed phrase
+
+---
+
+## Architecture
 
 ```
-User (Telegram Mini App)
-    ↓
-SAGE HTML/JS (GitHub Pages)
-    ↓                    ↓
-Cloudflare Worker        Render Node.js Backend
-(Claude AI proxy,        (STON.fi SDK swaps,
- wallet data)            limit orders, staking)
-    ↓                    ↓
-Anthropic Claude API     STON.fi Protocol
-                         TON Stakers SDK
-                         Supabase (order storage)
+User (WhatsApp)
+      ↓
+Baileys (WA Linked Device)
+      ↓
+Node.js Server (Railway)
+      ↓              ↓               ↓
+Claude Haiku    STON.fi SDK      TONAPI / GeckoTerminal
+(AI reasoning   (swaps, limit    (balances, transactions,
+ + tool use)     orders, staking) price data, events)
+      ↓
+Supabase
+(session auth, wallets, limit orders)
 ```
 
 ### Tech Stack
-- **Frontend**: Single-file HTML/JS, deployed on GitHub Pages
-- **AI**: Claude Sonnet via Anthropic API (Cloudflare Worker proxy)
-- **Swap Engine**: Node.js + `@ston-fi/sdk` on Render
-- **Liquid Staking**: `tonstakers-sdk`
-- **Order Storage**: Supabase (PostgreSQL)
-- **Wallet**: TON Connect 2.0
-- **Price Data**: STON.fi API + CoinGecko
+
+| Layer | Technology |
+|-------|-----------|
+| WhatsApp | Baileys `@whiskeysockets/baileys` v6 |
+| AI | Claude Haiku 4.5 via Anthropic API |
+| Swap Engine | `@ston-fi/sdk` + Omniston RFQ SDK |
+| Blockchain | `@ton/ton` — WalletContractV4 |
+| Price Data | GeckoTerminal API + STON.fi API |
+| Charts | QuickChart.io (Chart.js rendered as PNG) |
+| Storage | Supabase (PostgreSQL) |
+| Deployment | Railway (single replica, persistent session) |
 
 ---
 
-## 🚀 How It Works
+## How It Works
+
+### Session Persistence
+SAGE uses a Baileys linked device session stored in Supabase. On deploy, it waits 35 seconds after the health check passes before connecting to WhatsApp — this prevents Railway's rolling restarts from triggering a re-scan. On shutdown, it releases the Supabase lock without closing the WebSocket so the session stays valid.
 
 ### Swap Flow
-1. User: *"Swap 0.1 TON to NOT"*
-2. SAGE simulates via STON.fi API
-3. Render builds tx using `@ston-fi/sdk`
-4. TON Connect opens for user signature
-5. Transaction executes on-chain
+1. User: *"Swap 0.5 TON to NOT"*
+2. SAGE calls `lookup_token` to resolve NOT → contract address
+3. Calls `get_swap_quote` → shows rate and expected output
+4. User confirms → `execute_swap` runs via Omniston SDK
+5. Transaction receipt card sent via QuickChart
 
-### Limit Order Flow
-1. User: *"Buy $0.20 TON with USDT when TON hits $1.20"*
-2. SAGE shows limit order card with details
-3. User taps "Fund & Place Order"
-4. A dedicated encrypted agentic wallet is created for the user
-5. User sends USDT to their agent wallet
-6. Render monitors price every 30 seconds
-7. When TON drops to $1.20 → agent wallet auto-swaps
-8. TON is sent back to user's main wallet automatically
+### Withdrawal Flow
+1. User: *"Send 2 TON to EQabc..."*
+2. SAGE confirms: *"Send 2 TON to EQabc...xyz. Confirm?"*
+3. User confirms → transfer sent via `@ton/ton` internal message
+4. Receipt card sent immediately
+5. Background process polls TONAPI for the tx hash, sends follow-up with Tonviewer link
 
-### TON Stakers Integration
-1. User: *"Stake 1 TON"*
-2. SAGE shows comparison: TON Stakers vs STON.fi Farm
-3. User selects TON Stakers
-4. `tonstakers-sdk` builds stake transaction
-5. User receives tsTON — liquid, tradeable, earning ~5% APY
+### Incoming Transfer Monitor
+- On first message after boot, user wallet is registered in memory
+- `setInterval` polls TONAPI events every 30 seconds per registered wallet
+- New `TonTransfer` or `JettonTransfer` events trigger a WhatsApp alert
 
 ---
 
-## 📦 Repositories
-
-| Repo | Purpose |
-|------|---------|
-| `sage-app` | Frontend HTML + GitHub Pages deployment |
-| `sage-swap` | Node.js backend on Render |
-
----
-
-## 🔧 Environment Variables (Render)
+## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
+| `ANTHROPIC_API_KEY` | Claude API key |
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_KEY` | Supabase anon key |
-| `ENCRYPTION_KEY` | 32-char key for encrypting agent wallet mnemonics |
+| `ENCRYPTION_KEY` | 32-char key for encrypting wallet mnemonics |
+| `TON_RPC_URL` | TON RPC endpoint (defaults to toncenter.com) |
+| `TONCENTER_API_KEY` | Toncenter API key (optional, for higher rate limits) |
+| `PORT` | HTTP port (Railway sets this automatically) |
 
 ---
 
-## 🗄️ Database Schema (Supabase)
+## Database Schema
 
 ```sql
--- Agent wallets (one per user)
+-- One custodial wallet per WhatsApp user
 create table agent_wallets (
   id uuid default gen_random_uuid() primary key,
-  user_wallet text unique,
-  agent_address text,
-  encrypted_mnemonic text,
-  created_at timestamptz
+  user_wallet text unique,       -- "wa:{jid}"
+  agent_address text,            -- TON wallet address
+  encrypted_mnemonic text,       -- AES-256 encrypted 24-word seed
+  created_at timestamptz default now()
 );
 
--- Limit orders
+-- Limit orders (auto-executed by background job)
 create table limit_orders (
   id uuid default gen_random_uuid() primary key,
   user_wallet text,
@@ -154,26 +158,66 @@ create table limit_orders (
   token_out_symbol text,
   amount float,
   target_price float,
-  direction text,
-  status text default 'pending',
-  created_at timestamptz,
+  direction text,                -- "buy" or "sell"
+  status text default 'pending', -- pending / filled / cancelled
+  created_at timestamptz default now(),
   filled_at timestamptz,
   filled_price float
+);
+
+-- WhatsApp session state
+create table whatsapp_auth (
+  key text primary key,
+  value text,
+  updated_at timestamptz default now()
 );
 ```
 
 ---
 
-## 🏆 Hackathon Tracks
+## Deployment (Railway)
 
-- **Main Track** — STON.fi Vibe Coding Hackathon
-- **Tonstakers Track** — TON liquid staking integration
+```toml
+# railway.toml
+[deploy]
+healthcheckPath = "/ping"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+numReplicas = 1
+```
+
+Single replica is required — multiple instances would conflict over the WhatsApp session lock.
 
 ---
 
-## 👤 Built by SAMMY
+## Example Conversations
 
-Made with Claude AI + STON.fi SDK + TON Connect
+```
+You: swap $2 worth of TON to NOT
+SAGE: Swap 1.32 TON → 4,821 NOT at rate 1 TON = 3,652 NOT. Confirm?
+You: yes
+SAGE: [sends transaction receipt card]
+SAGE: Tx: a1b2c3d4...e5f6g7h8  https://tonviewer.com/transaction/...
 
-*SAGE — Sharp, Autonomous, Generative, Expert*
+You: show me NOT 4h chart
+SAGE: [sends price chart image]
+      📊 NOT · 4H · ▼ 2.14%
 
+You: analyse my portfolio and tell me how to earn
+SAGE: You've got 1.2 TON ($1.84) and 4,800 NOT ($0.62).
+      TON is sitting idle — stake it for 5.2% APY, that's ~$0.10/year on this amount.
+      NOT is small — either hold for upside or swap into TON to consolidate.
+      Recommended: stake your TON now. Want me to do it?
+
+You: withdraw 1 TON to EQDxxx...
+SAGE: Send 1 TON to EQDxxx...abc. Confirm?
+You: yes
+SAGE: [sends withdrawal receipt card]
+SAGE: Tx: f8e7d6c5...b4a3  https://tonviewer.com/transaction/...
+```
+
+---
+
+## Built by Samson Samuel
+
+SAGE — Sharp, Autonomous, Generative, Expert
