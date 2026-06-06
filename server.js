@@ -190,6 +190,48 @@ app.get('/debug', (req,res) => res.json({
   hasEncryptionKey: !!process.env.ENCRYPTION_KEY,
 }));
 
+// ── Admin send (test) ─────────────────────────────────────
+app.post('/admin/send-chart', async (req, res) => {
+  try {
+    const { phone, symbol = 'NOT', timeframe = '4h' } = req.body;
+    if (!phone) return res.status(400).json({ error: 'phone required' });
+    if (!waSocket || !waConnected) return res.status(503).json({ error: 'WhatsApp not connected' });
+    const jid = phone.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+    const chartBuf = await (async () => {
+      const tfMap = { '1h':{interval:'hour',aggregate:1,limit:24},'4h':{interval:'hour',aggregate:4,limit:42},'1d':{interval:'day',aggregate:1,limit:30},'1w':{interval:'day',aggregate:1,limit:14},'1m':{interval:'day',aggregate:1,limit:30} };
+      const { interval, aggregate, limit } = tfMap[timeframe] || tfMap['1d'];
+      const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), 12000);
+      const search = await fetch(`https://api.geckoterminal.com/api/v2/search/pools?query=${encodeURIComponent(symbol+' TON')}&network=ton&page=1`,{headers:{Accept:'application/json'},signal:ctrl.signal});
+      const sd = await search.json(); const pool = sd?.data?.[0];
+      if (!pool) throw new Error('No pool found');
+      const poolAddress = pool.attributes?.address;
+      const pairName = pool.attributes?.name || '';
+      const isBase = pairName.toUpperCase().startsWith(symbol.toUpperCase());
+      const ctrl2 = new AbortController(); setTimeout(() => ctrl2.abort(), 12000);
+      const ohlcvRes = await fetch(`https://api.geckoterminal.com/api/v2/networks/ton/pools/${poolAddress}/ohlcv/${interval}?aggregate=${aggregate}&limit=${limit}`,{headers:{Accept:'application/json'},signal:ctrl2.signal});
+      if (!ohlcvRes.ok) throw new Error(`OHLCV ${ohlcvRes.status}`);
+      const ohlcvData = await ohlcvRes.json();
+      const ohlcv = ohlcvData?.data?.attributes?.ohlcv_list;
+      if (!ohlcv?.length) throw new Error('No OHLCV data');
+      const sorted = [...ohlcv].reverse();
+      const price = r => { const p = parseFloat(r); return isBase ? p : (p!==0?1/p:0); };
+      const labels = sorted.map(([ts]) => { const d = new Date(ts*1000); return interval==='hour'?`${d.getHours().toString().padStart(2,'0')}:00`:`${d.getMonth()+1}/${d.getDate()}`; });
+      const closes = sorted.map(([,,,, c]) => price(c));
+      const firstOpen = price(sorted[0][1]); const lastClose = closes[closes.length-1]; const isUp = lastClose >= firstOpen;
+      const maxP = Math.max(...closes); const dp = maxP<0.0001?8:maxP<0.01?6:maxP<1?4:2;
+      const chartConfig = { type:'line', data:{ labels, datasets:[{ label:symbol, data:closes.map(v=>parseFloat(v.toFixed(dp))), fill:true, borderColor:isUp?'#00e676':'#ff5252', backgroundColor:isUp?'rgba(0,230,118,0.07)':'rgba(255,82,82,0.07)', tension:0.3, pointRadius:0, borderWidth:2 }] }, options:{ legend:{display:false}, scales:{ xAxes:[{ticks:{maxTicksLimit:6,fontColor:'#888',fontSize:10},gridLines:{color:'#222'}}], yAxes:[{ticks:{fontColor:'#888',fontSize:10},gridLines:{color:'#222'}}] } } };
+      const imgRes = await fetch('https://quickchart.io/chart',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({chart:chartConfig,width:700,height:320,backgroundColor:'#0d0d0d',version:2}) });
+      if (!imgRes.ok) throw new Error(`QuickChart ${imgRes.status}`);
+      const changePct = firstOpen!==0?((lastClose-firstOpen)/firstOpen*100).toFixed(2):'0.00';
+      return { buf: Buffer.from(await imgRes.arrayBuffer()), caption:`📊 *${symbol}* · ${timeframe.toUpperCase()} · ${isUp?'▲':'▼'} ${changePct}%` };
+    })();
+    await waSocket.sendMessage(jid, { image: chartBuf.buf, caption: chartBuf.caption });
+    res.json({ ok: true, jid });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Swap ──────────────────────────────────────────────────
 app.post('/build/swap', async (req,res) => {
   try {
