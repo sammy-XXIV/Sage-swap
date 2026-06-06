@@ -223,13 +223,16 @@ app.post('/admin/recheck-incoming', async (req, res) => {
     const { data: wallets } = await supabase.from('agent_wallets').select('user_jid, agent_address');
     if (!wallets?.length) return res.json({ ok: true, alerted: 0 });
     let alerted = 0;
+    const debug = [];
     for (const { user_jid, agent_address } of wallets) {
       const walletHex = normalizeAddr(agent_address);
       const r = await fetch(`https://tonapi.io/v2/accounts/${agent_address}/events?limit=20`, { headers: { Accept: 'application/json' } });
-      if (!r.ok) continue;
+      if (!r.ok) { debug.push({ agent_address, error: r.status }); continue; }
       const data = await r.json();
+      const actionTypes = [];
       for (const event of (data.events || []).reverse()) {
         for (const action of (event.actions || [])) {
+          actionTypes.push(action.type);
           let alertText = null;
           if (action.type === 'JettonTransfer' && action.status === 'ok') {
             const jt = action.JettonTransfer;
@@ -252,8 +255,9 @@ app.post('/admin/recheck-incoming', async (req, res) => {
           }
         }
       }
+      debug.push({ agent_address, walletHex, waConnected, eventCount: data.events?.length, actionTypes });
     }
-    res.json({ ok: true, alerted });
+    res.json({ ok: true, alerted, debug });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
