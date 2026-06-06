@@ -66,11 +66,11 @@ async function waitForTxHash(address, preLt, maxWaitMs = 20000) {
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 3000));
     try {
-      const res = await fetch(`https://tonapi.io/v2/accounts/${address}/transactions?limit=5`, { headers: { Accept: 'application/json' } });
+      const res = await fetch(`https://tonapi.io/v2/blockchain/accounts/${address}/transactions?limit=5`, { headers: { Accept: 'application/json' } });
       if (!res.ok) continue;
       const data = await res.json();
       const newTx = (data.transactions || []).find(tx => BigInt(tx.lt) > BigInt(preLt));
-      if (newTx?.hash) return Buffer.from(newTx.hash, 'base64').toString('hex');
+      if (newTx?.hash) return newTx.hash; // already hex
     } catch {}
   }
   return null;
@@ -1636,11 +1636,11 @@ async function runSageTool(name, input) {
       const walletData = await getWhatsAppWallet(userJid);
       if (!walletData) return 'No wallet found.';
       const address = walletData.agent_address;
-      const res = await fetch(`https://tonapi.io/v2/accounts/${address}/transactions?limit=${limit}`, { headers: { Accept: 'application/json' } });
+      const res = await fetch(`https://tonapi.io/v2/blockchain/accounts/${address}/transactions?limit=${limit}`, { headers: { Accept: 'application/json' } });
       if (!res.ok) return `Failed to fetch transactions (${res.status}).`;
       const data = await res.json();
       const txs = (data.transactions || []).map(tx => {
-        const hash = tx.hash ? Buffer.from(tx.hash, 'base64').toString('hex') : null;
+        const hash = tx.hash || null; // already hex in blockchain API
         const inMsg = tx.in_msg;
         const outMsgs = tx.out_msgs || [];
         const date = new Date(tx.utime * 1000).toUTCString().replace(' GMT', ' UTC');
@@ -1680,7 +1680,7 @@ async function runSageTool(name, input) {
       // Record latest LT before sending so we can find the new tx
       let preLt = 0n;
       try {
-        const preTxRes = await fetch(`https://tonapi.io/v2/accounts/${walletAddr}/transactions?limit=1`, { headers: { Accept: 'application/json' } });
+        const preTxRes = await fetch(`https://tonapi.io/v2/blockchain/accounts/${walletAddr}/transactions?limit=1`, { headers: { Accept: 'application/json' } });
         if (preTxRes.ok) { const d = await preTxRes.json(); preLt = BigInt(d.transactions?.[0]?.lt || 0); }
       } catch {}
 
