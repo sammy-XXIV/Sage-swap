@@ -73,13 +73,20 @@ async function resolveSymbol(tokenStr) {
   return s.slice(0, 4) + '...' + s.slice(-4); // fallback truncation
 }
 
-async function generateTxCard({ fromAmount, fromToken, toAmount, toToken }) {
+async function generateTxCard({ fromAmount, fromToken, toAmount, toToken, mode = 'swap' }) {
   const fromSym = await resolveSymbol(fromToken);
   const toSym   = await resolveSymbol(toToken);
   const from = `${fmtAmount(fromAmount)} ${fromSym}`;
-  const to   = `${fmtAmount(toAmount)} ${toSym}`;
-  const rate = fromAmount > 0 ? `1 ${fromSym} = ${fmtAmount(toAmount/fromAmount)} ${toSym}` : '';
+  const to   = mode === 'withdraw'
+    ? toToken  // already a truncated address string passed in
+    : `${fmtAmount(toAmount)} ${toSym}`;
   const time = new Date().toUTCString().replace(' GMT', ' UTC');
+
+  const isWithdraw = mode === 'withdraw';
+  const label      = isWithdraw ? '📤  WITHDRAWAL SENT'      : '✅  TRANSACTION APPROVED';
+  const labelColor = isWithdraw ? '#FFA726'                   : '#00E676';
+  const bottomLine = isWithdraw ? 'Chain: TON'               : 'DEX: STON.fi  |  Chain: TON';
+  const rateLine   = isWithdraw ? `Amount: ${from}`          : (fromAmount > 0 ? `Rate: 1 ${fromSym} = ${fmtAmount(toAmount/fromAmount)} ${toSym}` : '');
 
   const chart = {
     type: 'bar',
@@ -92,13 +99,13 @@ async function generateTxCard({ fromAmount, fromToken, toAmount, toToken }) {
             a1: { type: 'label', xValue: 0, yValue: 92, content: 'SAGE', color: '#00C2FF', font: { size: 26, weight: 'bold' } },
             a2: { type: 'label', xValue: 0, yValue: 82, content: 'STON.fi AGENT', color: '#2A5070', font: { size: 11 } },
             sep1: { type: 'line', yMin: 73, yMax: 73, borderColor: '#0F2040', borderWidth: 1 },
-            a3: { type: 'label', xValue: 0, yValue: 65, content: '✅  TRANSACTION APPROVED', color: '#00E676', font: { size: 14, weight: 'bold' } },
+            a3: { type: 'label', xValue: 0, yValue: 65, content: label, color: labelColor, font: { size: 14, weight: 'bold' } },
             fromLabel: { type: 'label', xValue: 0, yValue: 53, content: from, color: '#FFFFFF', font: { size: 19, weight: 'bold' }, xAdjust: -120 },
             arrow:     { type: 'label', xValue: 0, yValue: 53, content: '→', color: '#00C2FF', font: { size: 19 } },
-            toLabel:   { type: 'label', xValue: 0, yValue: 53, content: to,   color: '#00C2FF', font: { size: 19, weight: 'bold' }, xAdjust: 120 },
+            toLabel:   { type: 'label', xValue: 0, yValue: 53, content: to,   color: '#00C2FF', font: { size: isWithdraw ? 13 : 19, weight: 'bold' }, xAdjust: 120 },
             sep2: { type: 'line', yMin: 38, yMax: 38, borderColor: '#0F2040', borderWidth: 1 },
-            a5: { type: 'label', xValue: 0, yValue: 30, content: `Rate: ${rate}`, color: '#6A90B8', font: { size: 13 } },
-            a6: { type: 'label', xValue: 0, yValue: 19, content: `DEX: STON.fi  |  Chain: TON`, color: '#6A90B8', font: { size: 13 } },
+            a5: { type: 'label', xValue: 0, yValue: 30, content: rateLine, color: '#6A90B8', font: { size: 13 } },
+            a6: { type: 'label', xValue: 0, yValue: 19, content: bottomLine, color: '#6A90B8', font: { size: 13 } },
             a7: { type: 'label', xValue: 0, yValue: 8,  content: time, color: '#3A5570', font: { size: 11 } },
           }
         }
@@ -1555,39 +1562,36 @@ async function runSageTool(name, input) {
 
       const seqno = await contract.getSeqno();
 
+      const truncatedDest = `${toAddress.slice(0, 6)}...${toAddress.slice(-4)}`;
+
       if (token === 'TON' || token === 'ton') {
-        // Native TON transfer
         const nanoAmount = BigInt(Math.round(amount * 1e9));
         await contract.sendTransfer({
           seqno,
           secretKey: keyPair.secretKey,
           messages: [internal({ to: toAddress, value: nanoAmount, bounce: false })],
         });
-        return JSON.stringify({ success: true, sent: amount, symbol: 'TON', to: toAddress });
       } else {
-        // Jetton transfer
         const senderAddr = wallet.address.toString({ bounceable: false, urlSafe: true });
-        // Get user's jetton wallet address
         const jwRes = await fetch(`https://api.ston.fi/v1/jetton/${token}/address?owner_address=${senderAddr}`);
         const jwData = await jwRes.json();
         if (!jwData?.address) return `Could not find ${symbol} jetton wallet for your address.`;
         const jettonWalletAddr = jwData.address;
 
-        // Get decimals from STON.fi asset list
         const assets = await getAssets();
         const asset = assets.find(a => a.contract_address === token || a.contract_address?.toLowerCase() === token.toLowerCase());
         const decimals = asset?.decimals ?? 9;
         const tokenUnits = BigInt(Math.round(amount * Math.pow(10, decimals)));
 
         const transferBody = beginCell()
-          .storeUint(0x0f8a7ea5, 32)   // jetton transfer op
-          .storeUint(Date.now(), 64)    // query id
-          .storeCoins(tokenUnits)        // amount
-          .storeAddress(Address.parse(toAddress)) // destination
-          .storeAddress(Address.parse(senderAddr)) // response destination (get excess gas back)
-          .storeBit(0)                   // no custom payload
-          .storeCoins(BigInt('1'))       // forward amount
-          .storeBit(0)                   // no forward payload
+          .storeUint(0x0f8a7ea5, 32)
+          .storeUint(Date.now(), 64)
+          .storeCoins(tokenUnits)
+          .storeAddress(Address.parse(toAddress))
+          .storeAddress(Address.parse(wallet.address.toString({ bounceable: false, urlSafe: true })))
+          .storeBit(0)
+          .storeCoins(BigInt('1'))
+          .storeBit(0)
           .endCell();
 
         await contract.sendTransfer({
@@ -1595,8 +1599,19 @@ async function runSageTool(name, input) {
           secretKey: keyPair.secretKey,
           messages: [internal({ to: jettonWalletAddr, value: BigInt('50000000'), body: transferBody, bounce: true })],
         });
-        return JSON.stringify({ success: true, sent: amount, symbol, to: toAddress });
       }
+
+      // Queue receipt card
+      try {
+        const cardBuf = await generateTxCard({
+          fromAmount: amount, fromToken: symbol,
+          toAmount: 0, toToken: truncatedDest,
+          mode: 'withdraw',
+        });
+        pendingImages.set(userJid, { buffer: cardBuf, caption: `${amount} ${symbol} sent to ${truncatedDest}` });
+      } catch {}
+
+      return JSON.stringify({ success: true, sent: amount, symbol, to: toAddress });
     } catch (e) { return `Withdrawal failed: ${e.message}`; }
   }
 
@@ -1775,6 +1790,78 @@ async function useSupabaseAuthState() {
   };
 }
 
+// ── Incoming transfer monitor ─────────────────────────────
+const walletLastEventLt = new Map(); // agentAddress -> BigInt LT
+let monitorInterval = null;
+
+async function monitorIncomingTransfers() {
+  try {
+    const { data: wallets } = await supabase.from('agent_wallets').select('user_jid, agent_address');
+    if (!wallets?.length) return;
+    for (const { user_jid, agent_address } of wallets) {
+      try {
+        const res = await fetch(
+          `https://tonapi.io/v2/accounts/${agent_address}/events?limit=10&subject_only=true`,
+          { headers: { Accept: 'application/json' } }
+        );
+        if (!res.ok) continue;
+        const data = await res.json();
+        const events = data.events || [];
+        if (!events.length) continue;
+
+        const topLt = BigInt(events[0].lt);
+        if (!walletLastEventLt.has(agent_address)) {
+          walletLastEventLt.set(agent_address, topLt);
+          continue; // first check — just record, don't alert
+        }
+
+        const lastLt = walletLastEventLt.get(agent_address);
+        if (topLt <= lastLt) continue;
+        walletLastEventLt.set(agent_address, topLt);
+
+        const newEvents = events.filter(e => BigInt(e.lt) > lastLt);
+        for (const event of newEvents.reverse()) {
+          for (const action of (event.actions || [])) {
+            let alertText = null;
+
+            if (action.type === 'JettonTransfer' && action.status === 'ok') {
+              const jt = action.JettonTransfer;
+              const recipientAddr = jt?.recipient?.address;
+              if (!recipientAddr) continue;
+              // Normalize both to raw form for comparison
+              const normalRecipient = recipientAddr.replace(/^0:/, '').toLowerCase();
+              const normalWallet = agent_address.replace(/^0:/, '').toLowerCase();
+              if (!normalRecipient.includes(normalWallet) && !normalWallet.includes(normalRecipient)) continue;
+              const decimals = jt?.jetton?.decimals ?? 9;
+              const amt = (Number(jt?.amount || 0) / Math.pow(10, decimals)).toFixed(4).replace(/\.?0+$/, '');
+              const sym = jt?.jetton?.symbol || 'token';
+              const from = jt?.sender?.address ? `${jt.sender.address.slice(0,6)}...${jt.sender.address.slice(-4)}` : 'someone';
+              alertText = `💰 Received ${amt} ${sym}\nFrom: ${from}`;
+
+            } else if (action.type === 'TonTransfer' && action.status === 'ok') {
+              const tt = action.TonTransfer;
+              const recipientAddr = tt?.recipient?.address;
+              if (!recipientAddr) continue;
+              const normalRecipient = recipientAddr.replace(/^0:/, '').toLowerCase();
+              const normalWallet = agent_address.replace(/^0:/, '').toLowerCase();
+              if (!normalRecipient.includes(normalWallet) && !normalWallet.includes(normalRecipient)) continue;
+              const amt = (Number(tt?.amount || 0) / 1e9).toFixed(4).replace(/\.?0+$/, '');
+              const from = tt?.sender?.address ? `${tt.sender.address.slice(0,6)}...${tt.sender.address.slice(-4)}` : 'someone';
+              alertText = `💰 Received ${amt} TON\nFrom: ${from}`;
+            }
+
+            if (alertText && waSocket && waConnected) {
+              await waSocket.sendMessage(user_jid, { text: alertText }).catch(() => {});
+            }
+          }
+        }
+      } catch {}
+    }
+  } catch (e) {
+    console.error('Monitor error:', e.message);
+  }
+}
+
 async function startWhatsApp() {
   if (isStarting) return;
 
@@ -1855,6 +1942,10 @@ async function startWhatsApp() {
       currentQR = null;
       await supabase.from('whatsapp_auth').delete().eq('key', '_qr');
       lockHeartbeat = setInterval(renewLock, 20000);
+      if (!monitorInterval) {
+        monitorInterval = setInterval(monitorIncomingTransfers, 30000);
+        console.log('👁 Incoming transfer monitor started (30s interval)');
+      }
       console.log('✅ WhatsApp connected!');
     }
   });
@@ -1911,6 +2002,7 @@ async function gracefulShutdown() {
   console.log('🛑 Shutting down — releasing lock...');
   intentionalClose = true;
   if (lockHeartbeat) clearInterval(lockHeartbeat);
+  if (monitorInterval) { clearInterval(monitorInterval); monitorInterval = null; }
   if (restartTimer) clearTimeout(restartTimer);
   // Do NOT call waSocket.end() — a proper WS close frame causes WhatsApp to
   // invalidate the session. A raw TCP drop (process exit) is treated as a
