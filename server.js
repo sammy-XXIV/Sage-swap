@@ -220,8 +220,8 @@ app.post('/admin/recheck-incoming', async (req, res) => {
       try { return Address.parse(addr).toRawString().replace(/^0:/, '').toLowerCase(); }
       catch { return (addr || '').replace(/^0:/, '').toLowerCase(); }
     };
-    const { data: wallets } = await supabase.from('agent_wallets').select('user_jid, agent_address');
-    if (!wallets?.length) return res.json({ ok: true, alerted: 0 });
+    if (!activeWalletRegistry.size) return res.json({ ok: true, alerted: 0, note: 'No wallets in registry — user must send a message first' });
+    const wallets = [...activeWalletRegistry.entries()].map(([user_jid, agent_address]) => ({ user_jid, agent_address }));
     let alerted = 0;
     const debug = [];
     for (const { user_jid, agent_address } of wallets) {
@@ -757,12 +757,16 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' })
 
 // ── WhatsApp Wallet Helpers ───────────────────────────────
 
+// In-memory wallet registry for monitor (populated as users interact, bypasses RLS)
+const activeWalletRegistry = new Map(); // jid -> agent_address
+
 async function getWhatsAppWallet(jid) {
   const { data } = await supabase
     .from('agent_wallets')
     .select('*')
     .eq('user_wallet', `wa:${jid}`)
     .single();
+  if (data?.agent_address) activeWalletRegistry.set(jid, data.agent_address);
   return data || null;
 }
 
@@ -1875,9 +1879,9 @@ let monitorInterval = null;
 
 async function monitorIncomingTransfers() {
   try {
-    const { data: wallets } = await supabase.from('agent_wallets').select('user_jid, agent_address');
-    if (!wallets?.length) return;
+    if (!activeWalletRegistry.size) return;
     const { Address } = await import('@ton/ton');
+    const wallets = [...activeWalletRegistry.entries()].map(([user_jid, agent_address]) => ({ user_jid, agent_address }));
 
     const normalizeAddr = (addr) => {
       try { return Address.parse(addr).toRawString().replace(/^0:/, '').toLowerCase(); }
