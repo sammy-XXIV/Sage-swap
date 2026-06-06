@@ -1828,10 +1828,20 @@ async function monitorIncomingTransfers() {
   try {
     const { data: wallets } = await supabase.from('agent_wallets').select('user_jid, agent_address');
     if (!wallets?.length) return;
+    const { Address } = await import('@ton/ton');
+
+    const normalizeAddr = (addr) => {
+      try { return Address.parse(addr).toRawString().replace(/^0:/, '').toLowerCase(); }
+      catch { return (addr || '').replace(/^0:/, '').toLowerCase(); }
+    };
+
     for (const { user_jid, agent_address } of wallets) {
       try {
+        const walletHex = normalizeAddr(agent_address);
+
+        // No subject_only — we want ALL events involving this account
         const res = await fetch(
-          `https://tonapi.io/v2/accounts/${agent_address}/events?limit=10&subject_only=true`,
+          `https://tonapi.io/v2/accounts/${agent_address}/events?limit=10`,
           { headers: { Accept: 'application/json' } }
         );
         if (!res.ok) continue;
@@ -1856,12 +1866,8 @@ async function monitorIncomingTransfers() {
 
             if (action.type === 'JettonTransfer' && action.status === 'ok') {
               const jt = action.JettonTransfer;
-              const recipientAddr = jt?.recipient?.address;
-              if (!recipientAddr) continue;
-              // Normalize both to raw form for comparison
-              const normalRecipient = recipientAddr.replace(/^0:/, '').toLowerCase();
-              const normalWallet = agent_address.replace(/^0:/, '').toLowerCase();
-              if (!normalRecipient.includes(normalWallet) && !normalWallet.includes(normalRecipient)) continue;
+              if (!jt?.recipient?.address) continue;
+              if (normalizeAddr(jt.recipient.address) !== walletHex) continue;
               const decimals = jt?.jetton?.decimals ?? 9;
               const amt = (Number(jt?.amount || 0) / Math.pow(10, decimals)).toFixed(4).replace(/\.?0+$/, '');
               const sym = jt?.jetton?.symbol || 'token';
@@ -1870,11 +1876,8 @@ async function monitorIncomingTransfers() {
 
             } else if (action.type === 'TonTransfer' && action.status === 'ok') {
               const tt = action.TonTransfer;
-              const recipientAddr = tt?.recipient?.address;
-              if (!recipientAddr) continue;
-              const normalRecipient = recipientAddr.replace(/^0:/, '').toLowerCase();
-              const normalWallet = agent_address.replace(/^0:/, '').toLowerCase();
-              if (!normalRecipient.includes(normalWallet) && !normalWallet.includes(normalRecipient)) continue;
+              if (!tt?.recipient?.address) continue;
+              if (normalizeAddr(tt.recipient.address) !== walletHex) continue;
               const amt = (Number(tt?.amount || 0) / 1e9).toFixed(4).replace(/\.?0+$/, '');
               const from = tt?.sender?.address ? `${tt.sender.address.slice(0,6)}...${tt.sender.address.slice(-4)}` : 'someone';
               alertText = `💰 Received ${amt} TON\nFrom: ${from}`;
