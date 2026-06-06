@@ -812,8 +812,11 @@ Tools available:
 - get_trending_tokens: top pools on STON.fi by 24h volume
 - cancel_limit_order: cancel an order by ID
 - stake_ton: stake TON for ~5.2% APY
+- withdraw: send TON or any token from SAGE wallet to an external address
 
-Tone: direct, confident, like a sharp crypto-native advisor. No hype, no fluff, no disclaimers. Give real opinions. Use WhatsApp formatting (*bold* for numbers/amounts, _italic_ sparingly). Keep replies short and punchy.
+Tone: direct, confident, like a sharp crypto-native advisor. No hype, no fluff, no disclaimers. Give real opinions. Keep replies short and punchy — 2-4 lines max unless detail is truly needed.
+
+FORMATTING: Plain text first. Use *bold* only on the single most important value in a message (e.g. the final amount or token name). Never bold multiple things in one message. No asterisks on labels, headings, or filler words. Avoid lists unless there are 3+ items. No em dashes, no bullet spam.
 
 MARKET ADVICE:
 You give real, opinionated crypto advice. When asked "what should I buy", "is X a good buy", "what's trending" etc:
@@ -839,7 +842,7 @@ SWAPS:
 1. When user names a token (e.g. "NOT", "STON", "DOGS"), immediately call lookup_token to resolve it — NEVER ask the user for the contract address. You have a lookup tool, use it.
 2. If user says "$X worth of TOKEN", call lookup_token for TON to get TON's USD price, then calculate fromAmount = X / TON_price_usd. NEVER round this to a whole number — use the exact decimal (e.g. $1 at $1.51/TON = 0.662 TON, not 1 TON).
 3. Call get_swap_quote with that exact decimal fromAmount
-4. Show the quote clearly: "Swap *X TON* → *Y TOKEN* at rate Z. Confirm?"
+4. Show the quote clearly: "Swap X TON → *Y TOKEN* at rate Z. Confirm?"
 5. Call execute_swap ONLY after user replies yes/confirm/ok
 6. If the quote fails due to no liquidity, say so clearly in one line — don't ask for the CA
 
@@ -848,8 +851,14 @@ LIMIT ORDERS:
 2. Understand: "buy TOKEN" = spend TON to get TOKEN. "sell TOKEN" = spend TOKEN to get TON. fromToken is what user spends, toToken is what user receives.
 3. "amount" is always in units of fromToken (the token being spent), not USD. If user says "$20 worth", you must first call lookup_token to get the current price, then calculate the equivalent token amount. Ask the user to confirm the calculated amount.
 4. Call get_wallet_balance to verify the user has enough fromToken before placing.
-5. Show the full order summary: "Limit order: Buy *X TOKEN* spending *Y TON* when price hits *Z*. You have *W TON* available. Confirm?"
+5. Show the full order summary: "Limit order: Buy X TOKEN spending Y TON when price hits Z. You have W TON available. Confirm?"
 6. Call place_limit_order ONLY after user explicitly says yes/confirm/ok. NEVER call it immediately — always wait for confirmation.
+
+WITHDRAWALS:
+1. When user says "withdraw", "send", or "transfer" with an amount and address, call withdraw.
+2. Show a confirmation first: "Send X TON to EQab...1234. Confirm?" — use truncated address (first 4 + last 4 chars).
+3. Call withdraw ONLY after user confirms.
+4. On success, confirm with the tx hash in one line.
 
 TOKEN SAFETY:
 - If a user asks to swap or buy a token you don't recognise as a major token (TON, USDT, USDC, NOT, DOGS, STON), call analyze_token first and show the risk level and flags before proceeding.
@@ -859,7 +868,7 @@ TOKEN SAFETY:
 GENERAL:
 - Always pass userJid from context when tools need it
 - Never add filler phrases like "Time to load up" or motivational fluff
-- Format balances clearly: *2.5 TON* ($3.20), not paragraphs
+- Format balances clearly: 2.5 TON ($3.20), not paragraphs
 - When giving advice on a specific token, offer to show a chart: "Want to see the chart?"
 - If balance is insufficient for a trade, tell the user and do not proceed
 - When get_trending_tokens returns pre-formatted text, send it exactly as-is — do not reformat, do not add tables, do not add extra headers
@@ -972,6 +981,21 @@ const sageTools = [
         userJid: { type: 'string' },
       },
       required: ['amount', 'userJid'],
+    },
+  },
+  {
+    name: 'withdraw',
+    description: 'Send TON or a jetton token from the user\'s SAGE wallet to an external TON address. For TON use token="TON". For tokens pass the contract address. Always confirm with user before calling.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        toAddress: { type: 'string', description: 'Destination TON wallet address' },
+        amount: { type: 'number', description: 'Amount to send' },
+        token: { type: 'string', description: '"TON" for native TON, or the jetton contract address' },
+        symbol: { type: 'string', description: 'Token symbol for display (e.g. TON, USDT)' },
+        userJid: { type: 'string' },
+      },
+      required: ['toAddress', 'amount', 'token', 'symbol', 'userJid'],
     },
   },
 ];
@@ -1516,6 +1540,64 @@ async function runSageTool(name, input) {
       await contract.sendTransfer({ seqno, secretKey: keyPair.secretKey, messages: [internal({ to: TONSTAKERS_POOL, value: nanoAmount + BigInt('100000000'), body })] });
       return JSON.stringify({ success: true, staked: amount, message: `${amount} TON staked via TON Stakers (~5.2% APY)` });
     } catch (e) { return `Staking failed: ${e.message}`; }
+  }
+
+  if (name === 'withdraw') {
+    try {
+      const { toAddress, amount, token, symbol, userJid } = input;
+      const walletData = await getWhatsAppWallet(userJid);
+      if (!walletData) return 'No wallet found.';
+      const mnemonic = decrypt(walletData.encrypted_mnemonic).split(' ');
+      const keyPair = await mnemonicToPrivateKey(mnemonic);
+      const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+      const contract = tonClient.open(wallet);
+      const { Address, beginCell } = await import('@ton/ton');
+
+      const seqno = await contract.getSeqno();
+
+      if (token === 'TON' || token === 'ton') {
+        // Native TON transfer
+        const nanoAmount = BigInt(Math.round(amount * 1e9));
+        await contract.sendTransfer({
+          seqno,
+          secretKey: keyPair.secretKey,
+          messages: [internal({ to: toAddress, value: nanoAmount, bounce: false })],
+        });
+        return JSON.stringify({ success: true, sent: amount, symbol: 'TON', to: toAddress });
+      } else {
+        // Jetton transfer
+        const senderAddr = wallet.address.toString({ bounceable: false, urlSafe: true });
+        // Get user's jetton wallet address
+        const jwRes = await fetch(`https://api.ston.fi/v1/jetton/${token}/address?owner_address=${senderAddr}`);
+        const jwData = await jwRes.json();
+        if (!jwData?.address) return `Could not find ${symbol} jetton wallet for your address.`;
+        const jettonWalletAddr = jwData.address;
+
+        // Get decimals from STON.fi asset list
+        const assets = await getAssets();
+        const asset = assets.find(a => a.contract_address === token || a.contract_address?.toLowerCase() === token.toLowerCase());
+        const decimals = asset?.decimals ?? 9;
+        const tokenUnits = BigInt(Math.round(amount * Math.pow(10, decimals)));
+
+        const transferBody = beginCell()
+          .storeUint(0x0f8a7ea5, 32)   // jetton transfer op
+          .storeUint(Date.now(), 64)    // query id
+          .storeCoins(tokenUnits)        // amount
+          .storeAddress(Address.parse(toAddress)) // destination
+          .storeAddress(Address.parse(senderAddr)) // response destination (get excess gas back)
+          .storeBit(0)                   // no custom payload
+          .storeCoins(BigInt('1'))       // forward amount
+          .storeBit(0)                   // no forward payload
+          .endCell();
+
+        await contract.sendTransfer({
+          seqno,
+          secretKey: keyPair.secretKey,
+          messages: [internal({ to: jettonWalletAddr, value: BigInt('50000000'), body: transferBody, bounce: true })],
+        });
+        return JSON.stringify({ success: true, sent: amount, symbol, to: toAddress });
+      }
+    } catch (e) { return `Withdrawal failed: ${e.message}`; }
   }
 
   return 'Unknown tool';
