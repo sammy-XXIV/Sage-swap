@@ -212,6 +212,13 @@ app.get('/debug', (req,res) => res.json({
   hasEncryptionKey: !!process.env.ENCRYPTION_KEY,
 }));
 
+// Reset LT tracking so next monitor cycle re-alerts for recent txs
+app.post('/admin/recheck-incoming', async (req, res) => {
+  for (const key of walletLastEventLt.keys()) walletLastEventLt.set(key, 0n);
+  await monitorIncomingTransfers();
+  res.json({ ok: true, checked: walletLastEventLt.size });
+});
+
 // ── Admin send (test) ─────────────────────────────────────
 app.post('/admin/send-chart', async (req, res) => {
   try {
