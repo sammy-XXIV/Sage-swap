@@ -61,7 +61,7 @@ function fmtAmount(n) {
   return Number(n).toFixed(n < 0.01 ? 6 : 4).replace(/\.?0+$/, '');
 }
 
-async function waitForTxHash(address, preLt, maxWaitMs = 12000) {
+async function waitForTxHash(address, preLt, maxWaitMs = 20000) {
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 3000));
@@ -888,6 +888,7 @@ Tools available:
 - cancel_limit_order: cancel an order by ID
 - stake_ton: stake TON for ~5.2% APY
 - withdraw: send TON or any token from SAGE wallet to an external address
+- get_recent_transactions: get the last few transactions for the user's wallet — use when user asks for tx hash, recent activity, or transaction history
 
 Tone: direct, confident, like a sharp crypto-native advisor. No hype, no fluff, no disclaimers. Give real opinions. Keep replies short and punchy — 2-4 lines max unless detail is truly needed.
 
@@ -1056,6 +1057,18 @@ const sageTools = [
         userJid: { type: 'string' },
       },
       required: ['amount', 'userJid'],
+    },
+  },
+  {
+    name: 'get_recent_transactions',
+    description: "Get the user's recent wallet transactions including tx hashes and tonviewer links. Use when user asks for tx hash, transaction history, or recent activity.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        userJid: { type: 'string' },
+        limit: { type: 'number', description: 'Number of transactions to return (default 5)' },
+      },
+      required: ['userJid'],
     },
   },
   {
@@ -1615,6 +1628,40 @@ async function runSageTool(name, input) {
       await contract.sendTransfer({ seqno, secretKey: keyPair.secretKey, messages: [internal({ to: TONSTAKERS_POOL, value: nanoAmount + BigInt('100000000'), body })] });
       return JSON.stringify({ success: true, staked: amount, message: `${amount} TON staked via TON Stakers (~5.2% APY)` });
     } catch (e) { return `Staking failed: ${e.message}`; }
+  }
+
+  if (name === 'get_recent_transactions') {
+    try {
+      const { userJid, limit = 5 } = input;
+      const walletData = await getWhatsAppWallet(userJid);
+      if (!walletData) return 'No wallet found.';
+      const address = walletData.agent_address;
+      const res = await fetch(`https://tonapi.io/v2/accounts/${address}/transactions?limit=${limit}`, { headers: { Accept: 'application/json' } });
+      if (!res.ok) return `Failed to fetch transactions (${res.status}).`;
+      const data = await res.json();
+      const txs = (data.transactions || []).map(tx => {
+        const hash = tx.hash ? Buffer.from(tx.hash, 'base64').toString('hex') : null;
+        const inMsg = tx.in_msg;
+        const outMsgs = tx.out_msgs || [];
+        const date = new Date(tx.utime * 1000).toUTCString().replace(' GMT', ' UTC');
+        let type = 'Unknown';
+        let amount = '';
+        if (inMsg?.value && Number(inMsg.value) > 0 && inMsg.source) {
+          type = 'Received';
+          amount = (Number(inMsg.value) / 1e9).toFixed(4) + ' TON';
+        } else if (outMsgs.length > 0 && outMsgs[0]?.value) {
+          type = 'Sent';
+          amount = (Number(outMsgs[0].value) / 1e9).toFixed(4) + ' TON';
+        }
+        return {
+          type, amount, date,
+          hash: hash ? `${hash.slice(0,8)}...${hash.slice(-8)}` : null,
+          explorer: hash ? `https://tonviewer.com/transaction/${hash}` : null,
+          fullHash: hash,
+        };
+      });
+      return JSON.stringify(txs);
+    } catch (e) { return `Error fetching transactions: ${e.message}`; }
   }
 
   if (name === 'withdraw') {
