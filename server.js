@@ -905,6 +905,20 @@ You give real, opinionated crypto advice. When asked "what should I buy", "is X 
 - Back your take with data (price, 24h change, volume, TVL)
 - Be concise — 3-5 lines max for advice, not essays
 
+PORTFOLIO ANALYSIS:
+When user asks to "analyse my portfolio", "what should I do with my holdings", "best way to earn", "how to grow my bag" etc:
+1. Call get_wallet_balance to see all holdings
+2. Call lookup_token for each token held (skip TON itself, price is known)
+3. Give a direct breakdown: what they hold, current value, and a specific action for each
+4. For earning: suggest staking TON (5.2% APY via stake_ton), or swapping dust into a stronger position
+5. Be direct — "You've got 1.2 TON sitting idle, stake it" not "you might consider staking"
+6. End with one clear recommended action
+
+NEVER GO SILENT — this is absolute:
+- Always send a reply, no matter what. If a tool fails, say so in one line and offer an alternative.
+- If you don't know what the user wants, ask one short question.
+- Never return an empty response. When in doubt, say "I didn't catch that — what do you need?"
+
 NEVER ASSUME OR GUESS — this is absolute:
 - If ANY detail is unclear, missing, or ambiguous — ask. Do not fill in gaps yourself.
 - Never assume a token symbol, amount, direction, price, or intent. If the user says "buy some tokens" with no amount — ask for the amount. If they say "swap" with no tokens — ask which tokens.
@@ -1808,7 +1822,7 @@ async function handleWhatsAppUserInput(input, userJid) {
 
     let response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 500,
+      max_tokens: 1024,
       system: systemWithWallet,
       tools: sageTools,
       messages: history,
@@ -1830,7 +1844,7 @@ async function handleWhatsAppUserInput(input, userJid) {
 
       response = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 500,
+        max_tokens: 1024,
         system: systemWithWallet,
         tools: sageTools,
         messages: history,
@@ -1838,7 +1852,7 @@ async function handleWhatsAppUserInput(input, userJid) {
     }
 
     const textBlock = response.content.find(b => b.type === 'text');
-    const reply = textBlock?.text || "I couldn't process that. Try again.";
+    const reply = textBlock?.text?.trim() || "Something went wrong on my end. What did you need?";
 
     history.push({ role: 'assistant', content: reply });
 
